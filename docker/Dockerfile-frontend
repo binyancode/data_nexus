@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+# See https://aka.ms/customizecontainer to learn how to customize your debug container and how Visual Studio uses this Dockerfile to build your images for faster debugging.
+# Docker context: frontend/DataNexus/
+
+# This stage is used when running from VS in fast mode (Default for Debug configuration)
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
+USER $APP_UID
+WORKDIR /app
+EXPOSE 8080
+EXPOSE 8081
+
+
+# This stage is used to build the service project
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS with-node
+RUN apt-get update && apt-get install -y curl && \
+    curl -sL https://deb.nodesource.com/setup_22.x | bash && \
+    apt-get -y install nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+
+FROM with-node AS build
+ARG BUILD_CONFIGURATION=Release
+WORKDIR /src
+
+# 1) 先只复制项目文件，利用 Docker 层缓存做 restore
+COPY ["DataNexus.Server/DataNexus.Server.csproj", "DataNexus.Server/"]
+COPY ["DataNexus.Library/DataNexus.Library.csproj", "DataNexus.Library/"]
+COPY ["datanexus.client/datanexus.client.esproj", "datanexus.client/"]
+COPY ["datanexus.client/package.json", "datanexus.client/"]
+COPY ["datanexus.client/package-lock.json", "datanexus.client/"]
+
+# 安装前端依赖；避免依赖 BuildKit 专属的 cache mount 语法
+RUN cd datanexus.client && npm install
+
+
+RUN dotnet restore "./DataNexus.Server/DataNexus.Server.csproj"
+
+# 2) 再复制全部源码（restore 层已缓存，不会因源码变更重新 restore）
+COPY . .
+WORKDIR "/src/DataNexus.Server"
+RUN dotnet build "./DataNexus.Server.csproj" -c $BUILD_CONFIGURATION -o /app/build
+
+# This stage is used to publish the service project to be copied to the final stage
+FROM build AS publish
+ARG BUILD_CONFIGURATION=Release
+RUN dotnet publish "./DataNexus.Server.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
+
+# This stage is used in production or when running from VS in regular mode (Default when not using the Debug configuration)
+FROM base AS final
+WORKDIR /app
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "DataNexus.Server.dll"]

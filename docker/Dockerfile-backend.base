@@ -1,0 +1,37 @@
+# 基础镜像：包含 Python + ODBC 驱动（Azure SQL Database 通过 pyodbc + ODBC Driver 18 访问）
+# 构建: docker build -f docker/Dockerfile-backend.base -t datanexus-python-base:3.11 .
+FROM python:3.11-slim
+
+# 设置环境变量
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# 安装系统依赖（pyodbc 需要 ODBC 驱动）
+# https://learn.microsoft.com/en-us/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server
+# Update and install required tools
+RUN apt-get update && apt-get install -y \
+    curl \
+    apt-transport-https \
+    gnupg \
+    ffmpeg \
+    gcc \
+    libpq-dev \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify Debian version is supported
+RUN DEBIAN_VERSION=$(grep VERSION_ID /etc/os-release | cut -d '"' -f 2 | cut -d '.' -f 1) && \
+    if ! echo "8 9 10 11 12 13" | grep -q "\b${DEBIAN_VERSION}\b"; then \
+        echo "Debian ${DEBIAN_VERSION} is not currently supported." && exit 1; \
+    fi
+
+# Download the package to configure the Microsoft repo
+RUN DEBIAN_VERSION=$(grep VERSION_ID /etc/os-release | cut -d '"' -f 2 | cut -d '.' -f 1) && \
+    curl -sSL -O https://packages.microsoft.com/config/debian/${DEBIAN_VERSION}/packages-microsoft-prod.deb && \
+    dpkg -i packages-microsoft-prod.deb && \
+    rm packages-microsoft-prod.deb
+
+# Install msodbcsql18, mssql-tools18, and additional dependencies
+RUN apt-get update && \
+    ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18 unixodbc-dev libgssapi-krb5-2 && \
+    rm -rf /var/lib/apt/lists/*

@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+# 应用镜像：基于 pip 镜像（已包含所有 Python 依赖）
+# 构建层级: Dockerfile-backend.base -> Dockerfile-backend.pip -> Dockerfile-backend
+#   1. docker build -f docker/Dockerfile-backend.base -t datanexus-python-base:3.11 .
+#   2. docker build -f docker/Dockerfile-backend.pip  -t datanexus-python-pip:3.11 backend
+#   3. docker build -f docker/Dockerfile-backend      -t datanexus-api backend
+# Docker context: backend/
+FROM datanexus-python-pip:3.11
+
+# 设置工作目录
+WORKDIR /app
+
+# 设置环境变量
+ENV PYTHONPATH=/app/app
+ENV APP_PREFIX=NEXUS
+ENV NEXUS_ALLOWED_ORIGINS=*
+ENV NEXUS_APP_NAME="Data Nexus Backend"
+
+# 复制应用代码
+COPY ./app ./app
+
+# 暴露端口（Azure App Service 默认使用 8000 或 80）
+EXPOSE 8000
+
+# 启动命令
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

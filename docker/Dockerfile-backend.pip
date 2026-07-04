@@ -1,0 +1,11 @@
+# syntax=docker/dockerfile:1
+# pip 依赖镜像：基于 base 镜像，预装 requirements.txt 中的所有 Python 包
+# 构建: docker build -f docker/Dockerfile-backend.pip -t datanexus-python-pip:3.11 backend
+FROM datanexus-python-base:3.11
+
+COPY requirements.txt /tmp/requirements.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip \
+    && pip install -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
