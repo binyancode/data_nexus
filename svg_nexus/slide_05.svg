@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewbox="0 0 1600 718" xmlns="http://www.w3.org/2000/svg"><style>
+                text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+                text[fill="#7e8fa6"] { fill: #b0bec5; }
+            </style>
+<defs>
+<marker id="ah5" markerheight="13" markerwidth="13" orient="auto" refx="9" refy="5">
+<path d="M0,0 L10,5 L0,10 Z" fill="#34D399"></path>
+</marker>
+</defs>
+<!-- 统一接口 -->
+<rect fill="#16302A" height="120" rx="16" stroke="#34D399" stroke-width="2" width="880" x="360" y="70"></rect>
+<text fill="#34D399" font-size="28" font-weight="700" text-anchor="middle" x="800" y="118">interface Resolver</text>
+<text fill="#EAF0F6" font-size="22" text-anchor="middle" x="800" y="160">manifest()  ·  plan(SQG_fragment) → Cost  ·  resolve(SQG_fragment) → Result</text>
+<!-- 三实现列 -->
+<g fill="none" stroke="#34D399" stroke-width="2">
+<path d="M560,320 L680,200" marker-end="url(#ah5)"></path>
+<path d="M800,320 L800,200" marker-end="url(#ah5)"></path>
+<path d="M1040,320 L920,200" marker-end="url(#ah5)"></path>
+</g>
+<g>
+<rect fill="#1C2A42" height="270" rx="16" stroke="#4FACFE" width="400" x="150" y="330"></rect>
+<rect fill="#173049" height="60" rx="16" width="400" x="150" y="330"></rect>
+<text fill="#4FACFE" font-size="24" font-weight="700" text-anchor="middle" x="350" y="370">数据 Resolver</text>
+<text fill="#EAF0F6" font-size="20" x="180" y="430">被动 · 确定性</text>
+<text fill="#B0BEC5" font-size="19" x="180" y="475">SQL / 文件 / 向量库</text>
+<text fill="#B0BEC5" font-size="19" x="180" y="520">resolve() = 生成查询取数</text>
+<text fill="#4FACFE" font-size="18" x="180" y="565">DAX / SQL / 语义召回</text>
+</g>
+<g>
+<rect fill="#33251A" height="270" rx="16" stroke="#FB923C" width="400" x="600" y="330"></rect>
+<rect fill="#3a2a1c" height="60" rx="16" width="400" x="600" y="330"></rect>
+<text fill="#FB923C" font-size="24" font-weight="700" text-anchor="middle" x="800" y="370">Agent Resolver</text>
+<text fill="#EAF0F6" font-size="20" x="630" y="430">主动 · 黑盒</text>
+<text fill="#B0BEC5" font-size="19" x="630" y="475">Fabric Data Agent / MCP</text>
+<text fill="#B0BEC5" font-size="19" x="630" y="520">resolve() = NL 提问</text>
+<text fill="#FB923C" font-size="18" x="630" y="565">返回答案 + 证据</text>
+</g>
+<g>
+<rect fill="#251C3A" height="270" rx="16" stroke="#A78BFA" width="400" x="1050" y="330"></rect>
+<rect fill="#2b2145" height="60" rx="16" width="400" x="1050" y="330"></rect>
+<text fill="#A78BFA" font-size="24" font-weight="700" text-anchor="middle" x="1250" y="370">动作 Resolver</text>
+<text fill="#EAF0F6" font-size="20" x="1080" y="430">主动 · 有状态</text>
+<text fill="#B0BEC5" font-size="19" x="1080" y="475">写回 / 审批 / 触发</text>
+<text fill="#B0BEC5" font-size="19" x="1080" y="520">resolve() = 执行副作用</text>
+<text fill="#A78BFA" font-size="18" x="1080" y="565">返回回执</text>
+</g>
+<text fill="#B0BEC5" font-size="21" text-anchor="middle" x="800" y="665">Planner 眼里没有「源」和「Agent」之分 —— 只有一堆声明 Capability、竞标同一段子图的 Resolver</text>
+</svg>

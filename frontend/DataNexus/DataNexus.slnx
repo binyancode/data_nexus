@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="datanexus.client/datanexus.client.esproj">
+    <Build />
+    <Deploy />
+  </Project>
+  <Project Path="DataNexus.Server/DataNexus.Server.csproj" />
+</Solution>

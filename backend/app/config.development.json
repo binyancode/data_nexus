@@ -1,0 +1,12 @@
+{
+    "ALLOWED_ORIGINS": [
+        "http://localhost:5173",
+        "https://localhost:5173"
+    ],
+    "nexus": {
+        "ontology": {
+            "backend": "sqlite",
+            "path": "nexus_ontology.dev.db"
+        }
+    }
+}

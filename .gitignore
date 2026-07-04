@@ -1,0 +1,20 @@
+# ── Python / backend ──
+**/.venv/
+**/__pycache__/
+*.pyc
+*.db
+.env
+
+# ── Node / frontend ──
+**/node_modules/
+**/dist/
+**/.vite/
+
+# ── .NET / VS ──
+**/bin/
+**/obj/
+**/.vs/
+
+# ── OS / editor ──
+Thumbs.db
+.DS_Store

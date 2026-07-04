@@ -1,0 +1,6 @@
+@DataNexus.Server_HostAddress = http://localhost:5145
+
+GET {{DataNexus.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
