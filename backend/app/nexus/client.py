@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Optional
+import time
+import traceback
+from typing import Callable, Optional
 
-from services.sql_db import sql_db
-from core.services import services
+from nexus.core.run_log import get_run_recorder
 from utils.logger import get_logger
 
 from nexus.core.models import Answer, ExecContext
@@ -39,35 +40,52 @@ class NexusClient:
 
     def ask(self, question: str, as_user: Optional[str] = None) -> Answer:
         ctx = ExecContext(question, as_user)
-        sqg = self.compiler.compile(question, ctx)
-        plan = self.optimizer.plan(sqg, ctx)
-        self.coordinator.execute(plan, ctx)
-        answer = self.generator.generate(sqg, plan, ctx)
+        ctx.recorder = get_run_recorder()
+        rec = ctx.recorder
+        rec.start_run(ctx.run_id, question, as_user)
+
+        run_state, answer = "done", None
         try:
-            self._persist(ctx, sqg, plan, answer)
-        except Exception as exc:
-            _logger.warning(f"persist run failed: {exc}")
+            sqg = self._stage(ctx, "compiler",
+                              lambda: self.compiler.compile(question, ctx),
+                              _dumps({"question": question}),
+                              lambda r: r.model_dump_json())
+            plan = self._stage(ctx, "optimizer",
+                               lambda: self.optimizer.plan(sqg, ctx),
+                               sqg.model_dump_json(),
+                               lambda r: r.model_dump_json())        # ← 前端画 flow 的结构来源
+            self._stage(ctx, "coordinator",
+                        lambda: self.coordinator.execute(plan, ctx),
+                        plan.model_dump_json(),
+                        lambda r: _dumps({k: v.model_dump() for k, v in r.items()}))
+            answer = self._stage(ctx, "generator",
+                                 lambda: self.generator.generate(sqg, plan, ctx),
+                                 None,
+                                 lambda r: r.model_dump_json())
+        except Exception:
+            run_state = "failed"
+            _logger.warning(f"run {ctx.run_id} failed:\n{traceback.format_exc()}")
+        finally:
+            rec.finish_run(ctx.run_id, run_state,
+                           (answer.model_dump_json() if answer else None), ctx.cost_ms)
+
+        if answer is None:
+            answer = Answer(run_id=ctx.run_id, question=question,
+                            text="执行失败。", status="error")
         return answer
 
-    def _persist(self, ctx: ExecContext, sqg, plan, answer: Answer) -> None:
-        db = services[sql_db]
-        db.execute_non_query(
-            f"""INSERT INTO {self._schema}.runs
-                (run_id, as_user, question, sqg, [plan], result, status, cost_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                ctx.run_id, ctx.as_user, ctx.question,
-                sqg.model_dump_json(), plan.model_dump_json(),
-                answer.model_dump_json(), answer.status, ctx.cost_ms,
-            ),
-        )
-        for node_id, res in ctx.results.items():
-            db.execute_non_query(
-                f"""INSERT INTO {self._schema}.run_steps
-                    (run_id, node_id, resolver, [call], [output], trust, verdict)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    ctx.run_id, node_id, res.resolver, res.detail,
-                    _dumps(res.rows), res.trust, res.error,
-                ),
-            )
+    # ── 单段引擎执行 + 记录（start/finish stage）──
+    def _stage(self, ctx: ExecContext, stage: str, fn: Callable,
+               input_json: Optional[str], out_ser: Callable) -> object:
+        rec = ctx.recorder
+        t0 = time.time()
+        rec.start_stage(ctx.run_id, stage, input_json)
+        try:
+            result = fn()
+        except Exception:
+            rec.finish_stage(ctx.run_id, stage, "failed", None,
+                             traceback.format_exc(), int((time.time() - t0) * 1000))
+            raise
+        rec.finish_stage(ctx.run_id, stage, "done", out_ser(result), None,
+                         int((time.time() - t0) * 1000))
+        return result

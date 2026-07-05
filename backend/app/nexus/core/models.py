@@ -3,7 +3,7 @@
 覆盖四层数据：
   - 本体：Concept / Binding
   - 查询：SQGNode / SQG（语义查询图）
-  - 计划：PlanStep / QueryPlan（优化器产物）
+  - 计划：PlanNode / QueryPlan（优化器产物）
   - 结果：NodeResult / LineageItem / Answer
   - 执行上下文：ExecContext
 """
@@ -16,6 +16,8 @@ from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
+
+from nexus.core.run_log import RunRecorder, NullRunRecorder
 
 
 # ─────────────────────────── 本体 ───────────────────────────
@@ -70,25 +72,49 @@ class SQGNode(BaseModel):
 
 
 class SQG(BaseModel):
-    """语义查询图：一次提问翻成的统一查询指令。"""
+    """语义查询图：一次提问翻成的统一查询指令（nodes + context）。"""
     question: str
     nodes: list[SQGNode] = Field(default_factory=list)
+    context: dict[str, Any] = Field(default_factory=dict)  # 编译器 → 优化器 交接包
 
     def node(self, node_id: str) -> Optional[SQGNode]:
         return next((n for n in self.nodes if n.id == node_id), None)
 
 
 # ─────────────────────────── 计划（优化器产物） ───────────────────────────
-class PlanStep(BaseModel):
-    """物理执行步骤：某个 SQG 节点选中的 Resolver + 具体调用。"""
-    node_id: str
-    resolver: str                         # 选中的 resolver 名
+class PlanNode(BaseModel):
+    """物理执行节点：选中的 Resolver + 具体调用，自带结构（前端据此独立画 flow）。"""
+    id: str
+    operator: Operator
+    name: str = ""
+    resolver: str = ""                    # 选中的 resolver 名
     call: dict[str, Any] = Field(default_factory=dict)  # 传给 resolver.fetch 的调用描述（如 {sql: ...}）
     depends_on: list[str] = Field(default_factory=list)
+    wave: int = 1                         # 第几波（优化器拓扑分波算好）
 
 
 class QueryPlan(BaseModel):
-    steps: list[PlanStep] = Field(default_factory=list)
+    """物理执行计划（与 SQG 同信封：nodes + context）。"""
+    nodes: list[PlanNode] = Field(default_factory=list)
+    context: dict[str, Any] = Field(default_factory=dict)  # 优化器 → 协调器 交接包
+
+
+def topo_waves(nodes: list) -> list[list]:
+    """按 depends_on 拓扑分波：返回 [[wave1节点...], [wave2...], ...]。
+    适用于任何带 .id / .depends_on 的节点（SQGNode / PlanNode 均可）。"""
+    ids = {n.id for n in nodes}
+    done: set = set()
+    remaining = list(nodes)
+    waves: list[list] = []
+    while remaining:
+        ready = [n for n in remaining
+                 if all((d in done) or (d not in ids) for d in n.depends_on)]
+        if not ready:                      # 成环保护：剩余全放最后一波
+            ready = remaining
+        waves.append(ready)
+        done.update(n.id for n in ready)
+        remaining = [n for n in remaining if n.id not in done]
+    return waves
 
 
 # ─────────────────────────── 结果 / 血缘 ───────────────────────────
@@ -136,6 +162,8 @@ class ExecContext:
         self.cancellation_token = cancellation_token
         self.started_at = time.time()
         self.results: dict[str, NodeResult] = {}   # node_id -> NodeResult
+        self.context: dict[str, Any] = {}          # 引擎间交接包（携 plan.context）
+        self.recorder: RunRecorder = NullRunRecorder()  # 运行记录器（由 client 注入）
 
     @property
     def cost_ms(self) -> int:

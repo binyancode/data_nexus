@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from nexus.core.models import SQG, QueryPlan, PlanStep, Operator, ExecContext
+from nexus.core.models import SQG, QueryPlan, PlanNode, Operator, ExecContext, topo_waves
 from nexus.ontology.store import OntologyStore
 
 
@@ -13,15 +13,28 @@ class Optimizer:
         self.ontology = ontology
 
     def plan(self, sqg: SQG, ctx: Optional[ExecContext] = None) -> QueryPlan:
-        steps = []
+        nodes: list[PlanNode] = []
         for node in sqg.nodes:
             if node.operator == Operator.AGGREGATE:
-                step = self._plan_aggregate(node)
-                if step:
-                    steps.append(step)
-        return QueryPlan(steps=steps)
+                pn = self._plan_aggregate(node)
+                if pn:
+                    nodes.append(pn)
 
-    def _plan_aggregate(self, node) -> Optional[PlanStep]:
+        # 按 depends_on 拓扑分波，把 wave 写进每个物理节点
+        waves = topo_waves(nodes)
+        for w, wave_nodes in enumerate(waves, start=1):
+            for pn in wave_nodes:
+                pn.wave = w
+
+        context = {
+            "as_user": ctx.as_user if ctx else None,
+            "max_wave": len(waves),
+            "parallelism": 4,
+            "placeholder": "brace",
+        }
+        return QueryPlan(nodes=nodes, context=context)
+
+    def _plan_aggregate(self, node) -> Optional[PlanNode]:
         metric = self.ontology.get_concept(node.concept) if node.concept else None
         if not metric:
             return None
@@ -41,10 +54,13 @@ class Optimizer:
         sql = f"SELECT {expr} AS value FROM {table}"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        return PlanStep(
-            node_id=node.id,
+        return PlanNode(
+            id=node.id,
+            operator=node.operator,
+            name=node.name,
             resolver=resolver,
             call={"node_id": node.id, "sql": sql, "params": params},
+            depends_on=list(node.depends_on),
         )
 
     def _entity_binding(self, entity_id: Optional[str]):
