@@ -1,7 +1,7 @@
 {
     "is_root": true,
     "APP_NAME": "Data Nexus API",
-    "APP_DESCRIPTION": "联邦语义中台 —— 一句话提问，跨源取数·归因·执行",
+    "APP_DESCRIPTION": "一句话提问，跨源取数、归因、执行",
     "APP_VERSION": "0.1.0",
     "ALLOWED_ORIGINS": [
         "http://localhost:5173",
@@ -9,16 +9,21 @@
     ],
     "nexus": {
         "ontology": {
-            "backend": "sqlite",
-            "path": "nexus_ontology.db"
-        },
-        "llm": {
-            "provider": "azure_openai",
-            "endpoint": "",
-            "api_key": "",
-            "deployment": "gpt-4o",
-            "api_version": "2024-06-01"
+            "backend": "azure_sql",
+            "schema": "nexus",
+            "server": "binyansql-ea-01.database.windows.net",
+            "database": "binyandb-data-nexus",
+            "username": "binyan",
+            "password": "AzureGlobal123!@#",
+            "driver": "{ODBC Driver 18 for SQL Server}",
+            "encrypt": "yes",
+            "trust_server_certificate": "no"
         }
+    },
+    "credential_provider": {
+        "vault_url": "https://binyankv-data-nexus.vault.azure.net/",
+        "auth_method": "default",
+        "tenant_id": "03d87c9e-bf69-4287-adc9-db61022cf75b"
     },
     "route_prefixes": {
         "api.v1.router": {
