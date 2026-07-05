@@ -69,11 +69,11 @@ class DbRunRecorder(RunRecorder):
             _run_log.warning(f"run recorder failed: {exc}")
 
     # ── run ──
-    def start_run(self, run_id, question, as_user):
+    def start_run(self, run_id, question, as_user, ontology_id=None):
         self._exec(
-            """INSERT INTO nexus.run (run_id, question, as_user, [state], cost_ms, created_at, updated_at)
-               VALUES (?, ?, ?, 'running', 0, SYSUTCDATETIME(), SYSUTCDATETIME())""",
-            (run_id, question, as_user),
+            """INSERT INTO nexus.run (run_id, question, as_user, ontology_id, [state], cost_ms, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'running', 0, SYSUTCDATETIME(), SYSUTCDATETIME())""",
+            (run_id, question, as_user, ontology_id),
         )
 
     def finish_run(self, run_id, state, answer, cost_ms):

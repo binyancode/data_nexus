@@ -46,10 +46,6 @@
                     "prefix": "/ask",
                     "tags": ["Ask"]
                 },
-                "concepts.router": {
-                    "prefix": "/concepts",
-                    "tags": ["Ontology"]
-                },
                 "resolvers.router": {
                     "prefix": "/resolvers",
                     "tags": ["Resolvers"]

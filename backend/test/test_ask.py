@@ -17,10 +17,22 @@ if _APP_DIR not in sys.path:
 from bootstrap import register_services
 from core.services import services
 from nexus.client import NexusClient
+from nexus.core.models import ExecContext
+from nexus.core.run_log import get_run_recorder
+
+
+def _ask_sync(nexus: NexusClient, question: str):
+    """同步版：建 ctx + 选本体 + 落 run，然后直接执行 ask(ctx, onto)。"""
+    ctx = ExecContext(question)
+    onto = nexus._select_ontology(question, None, None)
+    ctx.ontology_id = onto.ontology_id if onto else None
+    ctx.recorder = get_run_recorder()
+    ctx.recorder.start_run(ctx.run_id, question, None, ctx.ontology_id)
+    return nexus.ask(ctx, onto)
 
 
 def _print_answer(question: str, nexus: NexusClient) -> None:
-    ans = nexus.ask(question)
+    ans = _ask_sync(nexus, question)
     print(f"\nQ: {question}")
     print(f"A: {ans.text}   [status={ans.status}]")
     for li in ans.lineage:

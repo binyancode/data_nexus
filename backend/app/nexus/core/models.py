@@ -27,6 +27,7 @@ class ConceptKind(str, Enum):
     relation = "relation"
     metric = "metric"
     derivation = "derivation"
+    action = "action"
 
 
 class Concept(BaseModel):
@@ -49,6 +50,19 @@ class Binding(BaseModel):
     kind: str  # table | column | prompt | file | endpoint | expr
     expr: Optional[str] = None
     confidence: float = 1.0
+
+
+class Ontology(BaseModel):
+    """一份本体：元数据 + 一整块 graph JSON（所有概念）。按行存于 nexus.ontology。"""
+    ontology_id: str
+    name: str
+    description: Optional[str] = None
+    owner: str = ""
+    visibility: str = "private"           # private | shared | public
+    state: str = "draft"                  # draft | published
+    graph: dict[str, Any] = Field(default_factory=dict)
+    grants: list[str] = Field(default_factory=list)  # shared 时的可见用户
+    updated_at: Optional[str] = None
 
 
 # ─────────────────────────── 查询（SQG） ───────────────────────────
@@ -155,10 +169,12 @@ class Answer(BaseModel):
 class ExecContext:
     """一次运行的执行上下文（非 pydantic：含取消令牌等运行时对象）。"""
 
-    def __init__(self, question: str, as_user: Optional[str] = None, cancellation_token: Any = None):
-        self.run_id: str = uuid.uuid4().hex
+    def __init__(self, question: str, as_user: Optional[str] = None, cancellation_token: Any = None,
+                 run_id: Optional[str] = None, ontology_id: Optional[str] = None):
+        self.run_id: str = run_id or uuid.uuid4().hex
         self.question = question
         self.as_user = as_user
+        self.ontology_id = ontology_id
         self.cancellation_token = cancellation_token
         self.started_at = time.time()
         self.results: dict[str, NodeResult] = {}   # node_id -> NodeResult

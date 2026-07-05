@@ -16,6 +16,13 @@
             @keydown.enter.exact.prevent="onAsk"
           />
           <div class="ask-actions">
+            <div class="ask-onto">
+              <span class="ao-label">本体</span>
+              <el-select v-model="ontologyId" size="small" placeholder="自动" class="ao-sel">
+                <el-option value="" label="自动（智能路由）" />
+                <el-option v-for="o in ontologies" :key="o.ontologyId" :value="o.ontologyId" :label="o.name" />
+              </el-select>
+            </div>
             <span class="ask-hint">Enter 提问 · Shift+Enter 换行</span>
             <el-button type="primary" :loading="loading" :disabled="!question.trim()" @click="onAsk">
               提问
@@ -38,8 +45,8 @@
         </div>
       </section>
 
-      <!-- 回答区 -->
-      <section v-if="answered" class="answer-panel">
+      <!-- 回答区（运行完成后显示） -->
+      <section v-if="answerText" class="answer-panel">
         <div class="answer-head">
           <el-icon class="answer-icon"><Opportunity /></el-icon>
           <span class="answer-label">答案</span>
@@ -57,19 +64,28 @@
         </div>
       </section>
 
+      <!-- 执行过程（四段引擎 + SQG/执行图，提问后立即展示并实时刷新） -->
+      <section v-if="runId" class="runtime-panel">
+        <div class="runtime-title">分析执行过程</div>
+        <NexusRuntime :run-id="runId" :question="lastQuestion" @done="onRuntimeDone" />
+      </section>
+
       <!-- 空状态 -->
-      <section v-else class="empty-state">
+      <section v-if="!runId && !answerText" class="empty-state">
         <el-icon class="empty-icon"><ChatLineRound /></el-icon>
-        <p>提问后，这里会显示答案与每个数字的来源。</p>
+        <p>提问后，这里会显示分析执行过程与答案。</p>
       </section>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ask } from '../backend/Ask.js'
+import { listOntologies, type OntologyMeta } from '../bff/Ontology.js'
+import NexusRuntime from './runtime/NexusRuntime.vue'
+import type { RuntimeAnswer } from './runtime/dag'
 
 interface Cell {
   label: string
@@ -79,9 +95,16 @@ interface Cell {
 
 const question = ref('')
 const loading = ref(false)
-const answered = ref(false)
 const answerText = ref('')
 const lineage = ref<Cell[]>([])
+const runId = ref<string | null>(null)
+const lastQuestion = ref('')
+const ontologyId = ref('')
+const ontologies = ref<OntologyMeta[]>([])
+
+onMounted(async () => {
+  try { ontologies.value = await listOntologies() } catch { /* ignore */ }
+})
 
 const examples = [
   '华东上季度毛利',
@@ -94,26 +117,32 @@ function useExample(ex: string) {
   onAsk()
 }
 
-// 直连后端 POST {BaseUrl}/v1/ask（service 带 Bearer → 测 token 到后端的认证）
+// 异步提问：立即拿 run_id 并展示执行过程；答案由 NexusRuntime 完成时回传
 async function onAsk() {
   const q = question.value.trim()
   if (!q || loading.value) return
   loading.value = true
-  answered.value = false
+  answerText.value = ''
+  lineage.value = []
+  runId.value = null
+  lastQuestion.value = q
   try {
-    const res = await ask(q)
-    answerText.value = res.answer
-    lineage.value = (res.lineage || []).map((li) => ({
-      label: li.label,
-      value: li.value == null ? '—' : String(li.value),
-      source: li.source,
-    }))
-    answered.value = true
+    const res = await ask(q, ontologyId.value || null)
+    runId.value = res.run_id
   } catch (e: any) {
     ElMessage.error('提问失败：' + (e?.message || e))
   } finally {
     loading.value = false
   }
+}
+
+function onRuntimeDone(a: RuntimeAnswer) {
+  answerText.value = a.text
+  lineage.value = (a.lineage || []).map((li) => ({
+    label: li.label,
+    value: li.value == null ? '—' : String(li.value),
+    source: li.source,
+  }))
 }
 </script>
 
@@ -121,17 +150,13 @@ async function onAsk() {
 .ask-console {
   flex: 1;
   min-height: 0;
-  display: flex;
-  justify-content: center;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .ask-scroll {
-  width: 100%;
-  max-width: 860px;
-  height: 100%;
-  overflow-y: auto;
-  padding: 40px 24px 60px;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 44px 24px 72px;
 }
 
 .ask-hero {
@@ -154,10 +179,16 @@ async function onAsk() {
 .ask-box {
   background: var(--beone-bg-panel);
   border: 1px solid var(--beone-border);
-  border-radius: 12px;
-  padding: 14px;
-  box-shadow: var(--beone-shadow-panel);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: 0 10px 30px rgba(40, 51, 74, 0.1);
   text-align: left;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.ask-box:focus-within {
+  border-color: var(--beone-cerulean-blue);
+  box-shadow: 0 0 0 3px rgba(0, 103, 127, 0.12), 0 12px 34px rgba(0, 103, 127, 0.14);
 }
 
 .ask-box :deep(.el-textarea__inner) {
@@ -201,11 +232,23 @@ async function onAsk() {
 
 .answer-panel {
   margin-top: 32px;
-  background: var(--beone-bg-panel);
+  position: relative;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
   border: 1px solid var(--beone-border);
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 20px 22px;
-  box-shadow: var(--beone-shadow-panel);
+  box-shadow: 0 10px 30px rgba(40, 51, 74, 0.08);
+  overflow: hidden;
+}
+
+.answer-panel::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: linear-gradient(180deg, var(--beone-cerulean-blue), var(--beone-autumn-leaf));
 }
 
 .answer-head {
@@ -269,6 +312,17 @@ async function onAsk() {
   margin-top: 60px;
   text-align: center;
   color: var(--beone-text-secondary);
+}
+
+.runtime-panel {
+  margin-top: 28px;
+}
+
+.runtime-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--beone-text-primary);
+  margin-bottom: 14px;
 }
 
 .empty-icon {

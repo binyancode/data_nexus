@@ -12,8 +12,6 @@ from config import config
 from core.services import services
 from services.sql_db import sql_db
 from services.credential import azure_keyvault_credential_provider
-from nexus.ontology.azure_sql import AzureSqlOntologyStore
-from nexus.core.models import Concept, Binding, ConceptKind
 
 # ── 注册服务 ──
 services.register(sql_db)
@@ -74,32 +72,8 @@ def seed_registry(with_llm: bool):
         print("[DB] llm row: default")
 
 
-def seed_ontology():
-    store = AzureSqlOntologyStore({"schema": schema})
-    concepts = [
-        Concept(id="entity.sales", kind=ConceptKind.entity, name="销售明细", synonyms=["销售", "订单"]),
-        Concept(id="attribute.region", kind=ConceptKind.attribute, name="地区", synonyms=["区域"],
-                attrs={"entity": "entity.sales", "role": "region"}),
-        Concept(id="attribute.period", kind=ConceptKind.attribute, name="期间", synonyms=["季度", "时间"],
-                attrs={"entity": "entity.sales", "role": "period"}),
-        Concept(id="metric.gross_margin", kind=ConceptKind.metric, name="毛利", synonyms=["毛利额", "gross margin"],
-                attrs={"entity": "entity.sales", "expr": "SUM(amount - cost)"}),
-    ]
-    for c in concepts:
-        store.upsert_concept(c)
-    bindings = [
-        Binding(id="b.sales.table", concept_id="entity.sales", resolver="dwh", kind="table", expr="dbo.fact_sales"),
-        Binding(id="b.region.col", concept_id="attribute.region", resolver="dwh", kind="column", expr="region"),
-        Binding(id="b.period.col", concept_id="attribute.period", resolver="dwh", kind="column", expr="period"),
-    ]
-    for b in bindings:
-        store.upsert_binding(b)
-    print(f"[DB] ontology seeded: {len(concepts)} concepts, {len(bindings)} bindings")
-
-
 if __name__ == "__main__":
     seed_dwh_credential()
     with_llm = seed_openai_credential()
     seed_registry(with_llm)
-    seed_ontology()
-    print("SEED DONE")
+    print("SEED DONE (本体请跑 seed_dwh_ontology.py)")

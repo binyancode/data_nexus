@@ -24,6 +24,8 @@ import { loadAuthState } from '../common/authState.js'
 
 // 其余页面懒加载（各自独立 chunk，导航到才拉取）
 const PlaceholderPage = defineAsyncComponent(() => import('./PlaceholderPage.vue'))
+const RunsPage = defineAsyncComponent(() => import('./RunsPage.vue'))
+const OntologiesPage = defineAsyncComponent(() => import('./OntologiesPage.vue'))
 
 const activeMenu = ref('ask')
 
@@ -33,6 +35,8 @@ onMounted(() => {
 
 const componentMap: Record<string, Component> = {
   ask: AskConsole,
+  runs: RunsPage,
+  ontology: OntologiesPage,
 }
 
 const activeComponent = computed(() => componentMap[activeMenu.value] ?? PlaceholderPage)

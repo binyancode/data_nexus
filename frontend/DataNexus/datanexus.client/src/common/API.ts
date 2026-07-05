@@ -244,6 +244,10 @@ class API implements IAPI {
         return this.request(api, "POST", data, needAuth, unwrap, contentType, silent, stream);
     }
 
+    async put(api: string, data: any, needAuth: boolean = true, unwrap: boolean = true, contentType = "application/json", silent: boolean = false): Promise<any> {
+        return this.request(api, "PUT", data, needAuth, unwrap, contentType, silent);
+    }
+
     async del(api: string, needAuth: boolean = true, unwrap: boolean = true, contentType = "application/json", silent: boolean = false): Promise<any> {
         return this.request(api, "DELETE", null, needAuth, unwrap, contentType, silent);
     }

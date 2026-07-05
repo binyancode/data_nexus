@@ -1,6 +1,4 @@
-"""/api/v1/ask —— 自然语言提问入口（用 api_handler 装饰器：auth + log + inject）。"""
-import asyncio
-
+"""/api/v1/ask —— 自然语言提问入口（异步：先建 run 返回 run_id，后台线程执行；前端轮询 run 状态）。"""
 from fastapi import APIRouter, Request
 
 from core.api_handler import api_handler
@@ -14,7 +12,7 @@ router = APIRouter()
 @api_handler.auth()
 @api_handler.service()
 async def ask(request: Request, nexus: NexusClient = None):
-    """一句话提问 → 编译 → 优化 → 协调 → 生成 → 答案 + 出处。
+    """一句话提问 → 立即返回 run_id，后台执行四段引擎；前端据 run_id 轮询 nexus.run/run_stage/run_node 看进度。
 
     as_user 优先取自认证身份（request.state.identity），否则回退请求体。
     """
@@ -22,8 +20,10 @@ async def ask(request: Request, nexus: NexusClient = None):
     identity = getattr(request.state, "identity", None)
     as_user = (identity.user if identity else None) or body.get("as_user")
 
-    answer = await asyncio.to_thread(nexus.ask, body.get("q"), as_user)
-    return {
-        "answer": answer.text,
-        "lineage": [li.model_dump() for li in answer.lineage],
-    }
+    question = body.get("q")
+    ontology_id = body.get("ontology_id")   # 显式指定；缺省则由 LLM 自动路由
+
+    # start_ask 内部同步建 run（落库后才返回 run_id），再起后台线程执行；进度经 RunRecorder 落库
+    run_id = nexus.start_ask(question=question, as_user=as_user, ontology_id=ontology_id)
+
+    return {"run_id": run_id}

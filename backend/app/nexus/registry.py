@@ -12,6 +12,8 @@ from utils.logger import get_logger
 
 from nexus.resolvers.base import Resolver
 from nexus.resolvers.sql import SqlResolver
+from nexus.resolvers.agent import AgentResolver
+from nexus.resolvers.action import ActionResolver
 from nexus.llm.base import LLMProvider
 from nexus.llm.azure_openai import AzureOpenAIProvider
 
@@ -20,6 +22,8 @@ _logger = get_logger("registry")
 # 类型 → 实现类
 _RESOLVER_TYPES: dict[str, type] = {
     "sql": SqlResolver,
+    "agent": AgentResolver,
+    "action": ActionResolver,
 }
 _LLM_PROVIDERS: dict[str, type] = {
     "azure_openai": AzureOpenAIProvider,

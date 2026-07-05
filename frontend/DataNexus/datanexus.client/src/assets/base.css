@@ -24,7 +24,29 @@
   --beone-text-regular: #4f5a6d;
   --beone-text-secondary: #737f8c;
   --beone-shadow-panel: 0 12px 28px rgba(40, 51, 74, 0.08);
+
+  /* 科技感深色控制台调色板（运行过程可视化用） */
+  --tech-bg: #0d1a2b;
+  --tech-bg2: #16283f;
+  --tech-panel: rgba(255, 255, 255, 0.045);
+  --tech-panel-2: rgba(255, 255, 255, 0.075);
+  --tech-border: rgba(120, 200, 230, 0.18);
+  --tech-border-strong: rgba(120, 200, 230, 0.4);
+  --tech-cyan: #3bd6ec;
+  --tech-cyan-dim: #2a9fc0;
+  --tech-amber: #ffb347;
+  --tech-green: #35e0a1;
+  --tech-red: #ff6b6b;
+  --tech-text: #dce8f3;
+  --tech-dim: #8ba2b8;
+  --tech-glow: rgba(59, 214, 236, 0.45);
 }
+
+/* 细滚动条 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--beone-border-strong); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: var(--beone-slate); }
+::-webkit-scrollbar-track { background: transparent; }
 
 *,
 *::before,

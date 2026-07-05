@@ -98,7 +98,7 @@ class Coordinator:
         value = _result_value(res)
         ctx.recorder.finish_node(
             ctx.run_id, node.id, state, _dumps(call),
-            _dumps(res.rows), (None if value is None else str(value)),
+            _dumps(res.rows), (None if value is None else str(value)[:200]),
             res.source, res.trust, res.error, int((time.time() - t0) * 1000),
         )
 

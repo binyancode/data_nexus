@@ -20,7 +20,8 @@ class RunRecorder(ABC):
 
     # ── run（整体）──
     @abstractmethod
-    def start_run(self, run_id: str, question: str, as_user: Optional[str]) -> None: ...
+    def start_run(self, run_id: str, question: str, as_user: Optional[str],
+                  ontology_id: Optional[str] = None) -> None: ...
 
     @abstractmethod
     def finish_run(self, run_id: str, state: str, answer: Optional[str], cost_ms: int) -> None: ...
@@ -46,7 +47,7 @@ class RunRecorder(ABC):
 class NullRunRecorder(RunRecorder):
     """空记录器：不落库（默认 / 测试用）。"""
 
-    def start_run(self, run_id, question, as_user): pass
+    def start_run(self, run_id, question, as_user, ontology_id=None): pass
     def finish_run(self, run_id, state, answer, cost_ms): pass
     def start_stage(self, run_id, stage, input): pass
     def finish_stage(self, run_id, stage, state, output, error, cost_ms): pass
