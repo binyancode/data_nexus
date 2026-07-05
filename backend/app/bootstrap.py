@@ -1,25 +1,28 @@
 """bootstrap.py —— 共享的服务注册。
 
-把 Nexus 引擎注册进全局 IoC 容器，并注册示例 Resolver。
+把系统 DB、凭据提供器、Nexus 引擎注册进全局 IoC 容器。
 main.py 启动时调用。
 """
+from services.sql_db import sql_db
+from services.credential import azure_keyvault_credential_provider
 from core.services import services
 from nexus.client import NexusClient
-from nexus.resolvers import SqlResolver
 
 
 def register_services():
     """注册服务类型及默认配置映射。"""
+    services.register(sql_db)
+    services.register(azure_keyvault_credential_provider)
     services.register(NexusClient)
-    # services[NexusClient] 取实例时，自动把 config["nexus"] 传给构造函数
+
+    # services[Type] 取实例时，自动把对应 config 段传给构造函数
+    services.register_default_config(sql_db, "sql_db")
+    services.register_default_config(azure_keyvault_credential_provider, "credential_provider")
     services.register_default_config(NexusClient, "nexus")
 
 
 def register_resolvers():
-    """向 Nexus 注册各源 Resolver（能力层）。
+    """Resolver / LLM 由 NexusClient 启动时从 `nexus.resolvers` / `nexus.llms`
+    注册表加载（密文经 credential/KV），此处无需手动注册。"""
+    pass
 
-    示例：注册一个数仓 SQL 源。P0 阶段 plan()/resolve() 待实现，
-    但 capabilities() 已可用，能被 /api/v1/resolvers 列出。
-    """
-    nexus: NexusClient = services[NexusClient]
-    nexus.register_resolver(SqlResolver("dwh.sql", {}))

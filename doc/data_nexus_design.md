@@ -980,6 +980,8 @@ backend/app/
 | **P3** | 分析即行动 | `ActionResolver` + `ACT` + 幂等 + `RestResolver` | 问答后自动建复盘工单并回执，血缘可查 |
 | **P4** | 自动建本体 | `describe/sample` + LLM 推断候选 + 人工确认台 | 对接新库半自动生成可用本体 |
 
+> **实现进展（P0 已完成，2026-07）**：本体存储直接用 Azure SQL（`nexus` schema：concepts / bindings / runs / run_steps）；系统 DB 连接放顶层 `sql_db` 配置。**Resolver 与 LLM 均为「注册表 + 凭据」模式**：元数据存 `nexus.resolvers` / `nexus.llms`（非密配置 + credential_name），密文（连接串 / API Key）存 Azure Key Vault，启动时经 `azure_keyvault_credential_provider`（DefaultAzureCredential）装配。`.env` / config 中不含任何 resolver/LLM 明文。LLM 编译器（schema 约束 NL→SQG，规则兜底）已提前上线。
+
 ## 29. 里程碑与风险
 
 | 风险 | 影响 | 缓解 |

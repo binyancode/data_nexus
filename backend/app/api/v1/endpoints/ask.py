@@ -9,11 +9,7 @@ router = APIRouter()
 
 
 @router.post("", response_model=AskResponse)
-async def ask(req: AskRequest, nexus: NexusClient = Depends(get_nexus)):
-    """一句话提问 → 编译 → 调度 → 协调 → 生成 → 答案 + 血缘。"""
-    try:
-        answer = await nexus.ask(req.q, as_user=req.as_user)
-    except NotImplementedError as e:
-        # P0 骨架：引擎各段尚未实现
-        raise HTTPException(status_code=501, detail=str(e))
+def ask(req: AskRequest, nexus: NexusClient = Depends(get_nexus)):
+    """一句话提问 → 编译 → 优化 → 协调 → 生成 → 答案 + 出处。"""
+    answer = nexus.ask(req.q, as_user=req.as_user)
     return AskResponse(answer=answer.text, lineage=answer.lineage)

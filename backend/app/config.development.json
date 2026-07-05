@@ -7,17 +7,20 @@
         "http://localhost:5173",
         "https://localhost:5173"
     ],
+    "sql_db": {
+        "auth_method": "password",
+        "server": "binyansql-ea-01.database.windows.net",
+        "database": "binyandb-data-nexus",
+        "username": "binyan",
+        "password": "AzureGlobal123!@#",
+        "driver": "{ODBC Driver 18 for SQL Server}",
+        "encrypt": "yes",
+        "trust_server_certificate": "no"
+    },
     "nexus": {
         "ontology": {
             "backend": "azure_sql",
-            "schema": "nexus",
-            "server": "binyansql-ea-01.database.windows.net",
-            "database": "binyandb-data-nexus",
-            "username": "binyan",
-            "password": "AzureGlobal123!@#",
-            "driver": "{ODBC Driver 18 for SQL Server}",
-            "encrypt": "yes",
-            "trust_server_certificate": "no"
+            "schema": "nexus"
         }
     },
     "credential_provider": {

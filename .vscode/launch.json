@@ -10,7 +10,11 @@
         "app.main:app",
         "--reload",
         "--port",
-        "8000"
+        "8000",
+        "--ssl-keyfile",
+        "${env:APPDATA}/ASP.NET/https/datanexus.client.key",
+        "--ssl-certfile",
+        "${env:APPDATA}/ASP.NET/https/datanexus.client.pem"
       ],
       "cwd": "${workspaceFolder}/backend",
       "envFile": "${workspaceFolder}/backend/.env",
