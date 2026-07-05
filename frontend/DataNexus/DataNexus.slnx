@@ -3,5 +3,6 @@
     <Build />
     <Deploy />
   </Project>
+  <Project Path="DataNexus.Library/DataNexus.Library.csproj" />
   <Project Path="DataNexus.Server/DataNexus.Server.csproj" />
 </Solution>

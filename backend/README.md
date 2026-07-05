@@ -26,7 +26,7 @@ backend/
       ├─ client.py         # NexusClient 门面（SDK 入口）
       ├─ core/             # Concept · Binding · Capabilities · SQG · ExecContext
       ├─ resolvers/        # Resolver 接口 + SqlResolver
-      ├─ engine/           # Compiler · Dispatcher · Coordinator · Generator
+      ├─ engine/           # Compiler · Optimizer · Coordinator · Generator
       ├─ ontology/         # 本体存储（SQLite 起步）
       └─ registry.py       # Resolver 注册表 + 选源竞标候选
 ```
@@ -46,4 +46,4 @@ uvicorn main:app --reload --port 8000
 - 接口文档：`http://localhost:8000/docs`
 - 已注册源：`GET /api/v1/resolvers`
 
-> P0 阶段：引擎四段（Compiler/Dispatcher/Coordinator/Generator）为骨架，`/api/v1/ask` 会返回 501，待逐段实现。
+> P0 阶段：引擎四段（Compiler/Optimizer/Coordinator/Generator）为骨架，`/api/v1/ask` 会返回 501，待逐段实现。
