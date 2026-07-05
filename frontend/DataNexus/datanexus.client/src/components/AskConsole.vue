@@ -207,6 +207,22 @@ function onRuntimeDone(a: RuntimeAnswer) {
   padding: 0 4px;
 }
 
+.ask-onto {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ao-label {
+  font-size: 12px;
+  color: var(--beone-text-secondary);
+  white-space: nowrap;
+}
+
+.ao-sel {
+  width: 150px;
+}
+
 .ask-hint {
   font-size: 12px;
   color: var(--beone-text-secondary);

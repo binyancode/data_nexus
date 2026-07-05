@@ -86,6 +86,7 @@ class Compiler:
 # 输出 JSON 格式
 {{"nodes": [
   {{"id":"n1","operator":"AGGREGATE","name":"华东2024Q1毛利","concept":"<指标id>","params":{{"filters":[{{"concept":"<attribute id>","value":"华东"}},{{"concept":"<attribute id>","value":"2024Q1"}}]}},"depends_on":[]}},
+  {{"id":"n2","operator":"AGGREGATE","name":"订单数量前三的产品","concept":"<指标id>","params":{{"filters":[],"group_by":"<维度 attribute id>","order":"desc","limit":3}},"depends_on":[]}},
   {{"id":"n5","operator":"ASK","name":"毛利差异归因","concept":"<derivation id>","params":{{"prompt":"华东毛利={{n1}}，华南毛利={{n2}}，请分析华东更低的原因"}},"depends_on":["n1","n2"]}},
   {{"id":"n6","operator":"ACT","name":"建复盘任务","concept":"<action id>","params":{{"desc":"华东毛利复盘：{{n5}}","assignee":"华东"}},"depends_on":["n5"]}}
 ]}}
@@ -93,6 +94,10 @@ class Compiler:
 # 规则（重要）
 - 每个要对比/分析的数值都拆成**独立的 AGGREGATE 节点**，不要把多个地区或多个指标塞进一个节点。
 - filters 里的 concept 必须是**该指标口径表达式所用属性同一实体**下的 attribute id（例如指标口径用 fact_sales 的属性，就只用 fact_sales 的可过滤属性；不要选 dim_region / fact_order 等别的实体的属性）。
+- 排名 / TopN / 「前N / 最多 / 最高 / 按X分组」类问题：用**一个 AGGREGATE 节点**，在 params 里加：
+  - `group_by`：分组维度的 attribute id（如按产品排名就填产品名属性 id）。该属性可以属于别的实体，系统会自动 JOIN。
+  - `order`：`desc`（前N/最多/最高）或 `asc`（后N/最少/最低）。
+  - `limit`：取前几名的整数（如「前三」= 3）。不要为排名再拆多个节点。
 - 过滤取值：地区用中文（华东/华南/华北/华中），期间用 YYYYQn（如 2024Q1）；「上季度」按 2024Q1。
 - ASK 节点的 params.prompt 里用 {{nX}} 引用上游 AGGREGATE 的结果，并在 depends_on 里列出这些上游 id。
 - ACT 节点的 params.desc 用 {{nX}} 引用 ASK 的结论，depends_on 指向那个 ASK。

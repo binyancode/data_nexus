@@ -64,11 +64,21 @@ class Optimizer:
             return None
 
         filters = node.params.get("filters", [])
+        group_by = node.params.get("group_by")
+        order = (node.params.get("order") or "desc").lower()
+        order = "ASC" if order == "asc" else "DESC"
+        limit = node.params.get("limit")
+        try:
+            limit = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            limit = None
+        rank = {"group_by": group_by, "order": order, "limit": limit} if group_by else None
+
         # 新式：表达式用属性(attribute.*)表达，实体与 JOIN 由属性自动推导
-        resolved = self._resolve_attr_aggregate(expr, filters)
+        resolved = self._resolve_attr_aggregate(expr, filters, rank)
         if resolved is None:
             # 兼容旧式：metric.attrs.entity + 裸列表达式
-            resolved = self._resolve_entity_aggregate(metric, expr, filters)
+            resolved = self._resolve_entity_aggregate(metric, expr, filters, rank)
         if resolved is None:
             return None
         sql, params, resolver = resolved
@@ -79,7 +89,7 @@ class Optimizer:
         )
 
     # 属性表达式 → SQL（多实体自动 JOIN）
-    def _resolve_attr_aggregate(self, expr: str, filters: list):
+    def _resolve_attr_aggregate(self, expr: str, filters: list, rank: Optional[dict] = None):
         tokens = list(dict.fromkeys(_ATTR_TOKEN.findall(expr)))
         if not tokens:
             return None
@@ -94,6 +104,17 @@ class Optimizer:
             info[tid] = (ent, col)
             if ent not in ent_order:
                 ent_order.append(ent)
+
+        # 分组维度（group_by）：解析其实体/列，必要时并入 JOIN
+        group_ent = group_col = None
+        if rank and rank.get("group_by"):
+            gc = self.ontology.get_concept(rank["group_by"])
+            group_col = self._attr_column(rank["group_by"])
+            group_ent = gc.attrs.get("entity") if gc else None
+            if not (gc and group_col and group_ent):
+                return None
+            if group_ent not in ent_order:
+                ent_order.append(group_ent)
 
         # 实体 → 表/resolver/别名
         meta: dict[str, dict] = {}
@@ -134,13 +155,23 @@ class Optimizer:
                 joined.add(ent)
 
         where, params = self._build_where(filters, meta, single)
-        sql = f"SELECT {resolved_expr} AS value FROM {from_sql}"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
+
+        # 分组 / 排序 / TopN
+        if group_ent and group_col:
+            label_ref = col_ref(group_ent, group_col)
+            top = f"TOP ({int(rank['limit'])}) " if rank.get("limit") else ""
+            sql = f"SELECT {top}{label_ref} AS label, {resolved_expr} AS value FROM {from_sql}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += f" GROUP BY {label_ref} ORDER BY value {rank['order']}"
+        else:
+            sql = f"SELECT {resolved_expr} AS value FROM {from_sql}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
         return sql, params, resolver
 
     # 旧式：单实体 + 裸列表达式
-    def _resolve_entity_aggregate(self, metric, expr: str, filters: list):
+    def _resolve_entity_aggregate(self, metric, expr: str, filters: list, rank: Optional[dict] = None):
         table, resolver = self._entity_binding(metric.attrs.get("entity"))
         if not (table and resolver):
             return None
@@ -150,9 +181,18 @@ class Optimizer:
             if col:
                 where.append(f"{col} = ?")
                 params.append(f.get("value"))
-        sql = f"SELECT {expr} AS value FROM {table}"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
+
+        group_col = self._attr_column(rank["group_by"]) if rank and rank.get("group_by") else None
+        if group_col:
+            top = f"TOP ({int(rank['limit'])}) " if rank.get("limit") else ""
+            sql = f"SELECT {top}{group_col} AS label, {expr} AS value FROM {table}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += f" GROUP BY {group_col} ORDER BY value {rank['order']}"
+        else:
+            sql = f"SELECT {expr} AS value FROM {table}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
         return sql, params, resolver
 
     # 过滤条件 → WHERE（只应用属性在本次查询实体内的过滤；多实体时加别名前缀）

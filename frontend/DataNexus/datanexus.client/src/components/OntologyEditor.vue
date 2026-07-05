@@ -47,11 +47,29 @@
           </div>
           <div class="attr-list">
             <div class="al-h">字段（{{ selEntity.attributes.length }}）· 开=维度可过滤，关=度量</div>
-            <div v-for="a in selEntity.attributes" :key="a.id" class="al-row">
-              <span class="al-name">{{ a.name }}</span>
-              <el-switch :model-value="!!a.role" :disabled="!meta?.canEdit"
-                         @update:model-value="(v:any) => a.role = v ? (a.column || a.name) : null" />
-            </div>
+            <template v-for="a in selEntity.attributes" :key="a.id">
+              <div class="al-row">
+                <span class="al-caret" :class="{ on: a.role, open: selAttrId === a.id }">
+                  {{ a.role ? (selAttrId === a.id ? '▾' : '▸') : '' }}
+                </span>
+                <span class="al-name" :class="{ clickable: a.role }"
+                      @click="a.role && toggleAttr(a)">{{ a.name }}</span>
+                <el-switch :model-value="!!a.role" :disabled="!meta?.canEdit"
+                           @update:model-value="(v:any) => setAttrRole(a, v)" />
+              </div>
+              <div v-if="a.role && selAttrId === a.id" class="al-edit">
+                <div class="fld"><label>名称</label>
+                  <el-input v-model="a.name" :disabled="!meta?.canEdit" size="small" placeholder="业务名称" />
+                </div>
+                <div class="fld"><label>同义词</label>
+                  <el-select v-model="a.synonyms" multiple filterable allow-create default-first-option
+                             :disabled="!meta?.canEdit" size="small" style="width:100%" placeholder="回车添加" />
+                </div>
+                <div class="fld"><label>物理列</label>
+                  <el-input :model-value="a.column || ''" disabled size="small" class="mono" />
+                </div>
+              </div>
+            </template>
           </div>
           <el-button v-if="meta?.canEdit" size="small" type="danger" plain @click="deleteEntity">删除实体</el-button>
         </template>
@@ -206,7 +224,14 @@ async function load() {
 const selEntityId = ref<string | null>(null)
 const selEntity = computed(() => graph.value.entities.find((e) => e.id === selEntityId.value) || null)
 function selectEntity(id: string) { selEntityId.value = id }
-function onLayout(id: string, x: number, y: number) {
+const selAttrId = ref<string | null>(null)
+function toggleAttr(a: any) {
+  selAttrId.value = selAttrId.value === a.id ? null : a.id
+}
+function setAttrRole(a: any, on: boolean) {
+  a.role = on ? (a.column || a.name) : null
+  if (!on && selAttrId.value === a.id) selAttrId.value = null
+}function onLayout(id: string, x: number, y: number) {
   const e = graph.value.entities.find((en) => en.id === id)
   if (e) e.layout = { x, y }
 }
@@ -449,7 +474,14 @@ function slug(s: string) {
 .attr-list { margin: 12px 0; }
 .al-h { font-size: 12px; color: var(--beone-text-secondary); margin-bottom: 8px; }
 .al-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid #f0f3f6; }
+.al-caret { width: 12px; flex: 0 0 auto; font-size: 10px; color: #90a1b3; text-align: center; }
 .al-name { flex: 1; font-size: 13px; color: var(--beone-text-regular); }
+.al-name.clickable { cursor: pointer; }
+.al-name.clickable:hover { color: var(--beone-cerulean-blue); }
+.al-edit {
+  padding: 10px 10px 4px; margin: 2px 0 8px;
+  background: #f7fafd; border: 1px solid #e6edf5; border-radius: 8px;
+}
 
 .seg3 { display: flex; gap: 6px; padding: 4px; border-radius: 10px; background: #f4f7fb; border: 1px solid #e4ebf3; margin-bottom: 14px; }
 .seg3 button {

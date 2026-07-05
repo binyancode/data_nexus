@@ -41,6 +41,9 @@ METRICS = [
     {"id": "metric.gross_margin", "name": "毛利", "synonyms": ["毛利额", "gross margin"],
      "semantics": "销售额扣成本后的毛利",
      "expr": "SUM(attribute.fact_sales.amount - attribute.fact_sales.cost)"},
+    {"id": "metric.order_quantity", "name": "订单数量", "synonyms": ["订单量", "下单数量", "数量", "order quantity", "qty"],
+     "semantics": "订单明细的数量合计（可按产品/区域/客户分组排名）",
+     "expr": "SUM(attribute.fact_order.quantity)"},
 ]
 
 

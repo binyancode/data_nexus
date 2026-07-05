@@ -27,6 +27,23 @@ class Generator:
                 parts.append(f"{node.name}：取数失败（{res.error}）")
                 continue
 
+            # 排名/分组结果：多行 label + value
+            if res.rows and "label" in res.rows[0]:
+                ranked = [(r.get("label"), _norm(r.get("value"))) for r in res.rows]
+                listed = "、".join(f"{lbl}({val})" for lbl, val in ranked)
+                parts.append(f"{node.name}：{listed}")
+                data_nodes.append({"node_id": node.id, "name": node.name,
+                                   "items": [{"label": l, "value": v} for l, v in ranked]})
+                lineage.append(LineageItem(
+                    node_id=node.id,
+                    label=node.name,
+                    value=listed,
+                    resolver=res.resolver,
+                    source=res.source,
+                    detail=res.detail,
+                ))
+                continue
+
             value = None
             if res.rows:
                 first = res.rows[0]
