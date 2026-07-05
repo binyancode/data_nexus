@@ -5,7 +5,9 @@
     "APP_VERSION": "0.1.0",
     "ALLOWED_ORIGINS": [
         "http://localhost:5173",
-        "https://localhost:5173"
+        "https://localhost:5173",
+        "http://localhost:55876",
+        "https://localhost:55876"
     ],
     "sql_db": {
         "auth_method": "password",
@@ -29,10 +31,10 @@
         "tenant_id": "03d87c9e-bf69-4287-adc9-db61022cf75b"
     },
     "msal": {
-        "tenant_id": "",
+        "tenant_id": "03d87c9e-bf69-4287-adc9-db61022cf75b",
         "authority": "https://login.microsoftonline.com",
-        "client_id": "",
-        "audience": "",
+        "client_id": "2e82f259-2042-4fe7-861e-5b214bf65acb",
+        "audience": "api://2e82f259-2042-4fe7-861e-5b214bf65acb",
         "scopes": ["access_as_user"]
     },
     "route_prefixes": {
@@ -51,6 +53,10 @@
                 "resolvers.router": {
                     "prefix": "/resolvers",
                     "tags": ["Resolvers"]
+                },
+                "me.router": {
+                    "prefix": "/me",
+                    "tags": ["Auth"]
                 }
             }
         }

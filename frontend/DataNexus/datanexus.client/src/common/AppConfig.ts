@@ -17,10 +17,11 @@ interface APIConfig {
 let config = {
     MSALConfig: {
         auth: {
-            clientId: 'cb2d0012-33b1-48df-abc6-60957d6e8e19',
-            authority: 'https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47',
-            redirectUri: "https://localhost:5173/",
-            scope: "Forecast.Read"
+            clientId: '2e82f259-2042-4fe7-861e-5b214bf65acb',
+            authority: 'https://login.microsoftonline.com/03d87c9e-bf69-4287-adc9-db61022cf75b',
+            // 回跳地址取当前源（需在 Azure 应用注册的 SPA 重定向 URI 中登记，如 https://localhost:55876/）
+            redirectUri: window.location.origin + '/',
+            scope: "access_as_user"
         },
         cache: {
             cacheLocation: "sessionStorage",
@@ -29,4 +30,5 @@ let config = {
     }
 };
 
+export { config }
 export type { APIConfig, MSALConfig }

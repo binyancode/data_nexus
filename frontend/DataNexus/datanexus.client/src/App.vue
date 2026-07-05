@@ -1,47 +1,91 @@
-<script setup lang="ts">
-import HelloWorld from './components/HelloWorld.vue'
-import TheWelcome from './components/TheWelcome.vue'
+<script lang="ts">
+import { defineComponent } from 'vue'
+import Frame from './components/Frame.vue'
+import { service } from './common/APIService.js'
+
+export default defineComponent({
+  components: { Frame },
+  data() {
+    return {
+      authenticated: false,
+      authError: false,
+      errorMessage: '',
+    }
+  },
+  async mounted() {
+    try {
+      await service.authenticate()
+      this.authenticated = true
+    } catch {
+      // authenticate() 会触发 acquireTokenRedirect，页面将自动跳转登录页；
+      // 期间保持加载遮罩。
+      this.authError = true
+      this.errorMessage = '正在跳转登录页…'
+    }
+  },
+})
 </script>
 
 <template>
-  <header>
-    <img alt="Vue logo" class="logo" src="./assets/logo.svg" width="125" height="125" />
+  <!-- 已登录：显示主应用 -->
+  <Frame v-if="authenticated" />
 
-    <div class="wrapper">
-      <HelloWorld msg="You did it!" />
+  <!-- 未登录：全屏登录遮罩 -->
+  <div v-else class="auth-overlay">
+    <div class="auth-card">
+      <div class="auth-spinner" :class="{ 'auth-spinner--warn': authError }"></div>
+      <p class="auth-text">
+        {{ authError ? errorMessage : '正在登录，请稍候…' }}
+      </p>
     </div>
-  </header>
-
-  <main>
-    <TheWelcome />
-  </main>
+  </div>
 </template>
 
 <style scoped>
-header {
-  line-height: 1.5;
+.auth-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: linear-gradient(180deg, var(--beone-white) 0%, var(--beone-bg-page) 100%);
+  color: var(--beone-midnight-blue);
+  font-family: var(--beone-font-family);
+  z-index: 99999;
 }
 
-.logo {
-  display: block;
-  margin: 0 auto 2rem;
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
 }
 
-@media (min-width: 1024px) {
-  header {
-    display: flex;
-    place-items: center;
-    padding-right: calc(var(--section-gap) / 2);
-  }
+.auth-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--beone-border);
+  border-top-color: var(--beone-midnight-blue);
+  animation: auth-spin 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
 
-  .logo {
-    margin: 0 2rem 0 0;
-  }
+.auth-spinner--warn {
+  border-top-color: var(--beone-autumn-leaf);
+}
 
-  header .wrapper {
-    display: flex;
-    place-items: flex-start;
-    flex-wrap: wrap;
-  }
+@keyframes auth-spin {
+  to { transform: rotate(360deg); }
+}
+
+.auth-text {
+  font-size: 14px;
+  color: var(--beone-text-secondary);
+  margin: 0;
+  letter-spacing: 0.3px;
 }
 </style>
+

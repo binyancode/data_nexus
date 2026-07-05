@@ -1,4 +1,5 @@
 import { MSAL, type AuthenticationResult } from './MSAL.js'
+import { config } from './AppConfig.js'
 import axios, { AxiosError } from 'axios'
 
 interface IAPI {
@@ -249,7 +250,10 @@ class API implements IAPI {
 
     async authenticate(refreshToken: boolean = false): Promise<AuthenticationResult> {
         if (API.msal == null) {
-            API.msal = this.get('config/MSAL', false).then(config => new MSAL(config));
+            // 优先从 BFF 取 config/MSAL（与 AIBI 一致）；BFF 未就绪时用本地 AppConfig 兜底
+            API.msal = this.get('config/MSAL', false)
+                .then(config => new MSAL(config))
+                .catch(() => new MSAL(config.MSALConfig));
         }
         const msal = await API.msal;
         try {

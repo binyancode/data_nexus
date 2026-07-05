@@ -59,7 +59,7 @@ flowchart LR
 
 - **Vue → BFF**（`src/bff/*`，相对 `api/<path>`）：配置端点（`config/BackendAPI`、`config/MSAL`）+ BFF 原生、走 DB 的功能。dev 用 vite 代理 `^/api`→BFF，生产同源。
 - **Vue → Python 后端（直连）**（`src/backend/*`）：先从 BFF 拿到后端 BaseUrl（`config/BackendAPI`），再用**完整 URL** 直接打后端 `/api/v1/*`，请求带 MSAL `Authorization: Bearer`。后端用 `require_auth` 验 JWT，并对 SPA 源开 CORS。用于跑引擎（`/ask`）、编译、凭据等。
-- **BFF → DB（直连）**：`SqlService` 读写 `nexus` schema 的元数据（concepts / bindings / resolvers / llms）与运行历史（runs / run_steps）。
+- **BFF → DB（直连）**：`SqlService` 读写 `nexus` schema 的元数据（concepts / bindings / resolvers / llms）与运行记录（run / run_stage / run_node）。
 
 ### 2.2 前端目录约定（镜像 AIBI）
 
@@ -78,7 +78,7 @@ flowchart LR
 | 保存/更新数据源密文（连接串、Key） | **前端直连后端**（credential→KV） | 密文只由后端写 Key Vault |
 | 浏览/编辑 概念·绑定（本体） | **BFF 直连 DB** | 读写 `nexus.concepts / bindings` |
 | 浏览/新增/停用 Resolver、LLM 注册行 | **BFF 直连 DB** | 读写 `nexus.resolvers / llms`（非密字段） |
-| 运行历史列表 + 回看出处 | **BFF 直连 DB** | 读 `nexus.runs / run_steps` |
+| 运行历史列表 + 回看出处 | **BFF 直连 DB** | 读 `nexus.run / run_stage / run_node` |
 | 测试新数据源能否连通 | **前端直连后端** | 由后端用凭据实际连一次 |
 
 > 后端地址（BaseUrl）由 BFF 的 `config/BackendAPI` 端点下发，前端 `backendUrl()` 拼完整 URL 后直接请求后端（带 Bearer）。BFF **不代理**这些后端调用。
@@ -93,16 +93,16 @@ flowchart LR
 - 顶部一个大输入框：像聊天一样输入业务问题。
 - 回答区：先出**答案文本**，下面一排**出处卡片**（每个数字一张：业务名 = 值 · 来源库/表 · 口径 SQL）。
 - 出处卡片可点开 → 抽屉展示完整口径、信任分、若多源则各来源对照。
-- **执行过程面板**（提问后实时展开，见 §4.7）：四段引擎的输入/输出逐段亮起；协调器阶段用 **VueFlow** 画出 SQG，实时显示每个节点执行到哪一步。
-- 通道：直连后端；同步用 `POST {BaseUrl}/v1/ask`，需要看进度用流式 `POST {BaseUrl}/v1/ask/stream`（SSE）。
+- **执行过程面板**（提问后实时展开，见 §4.7）：四段引擎的输入/输出逐段亮起；协调器阶段用 **VueFlow** 画出 DAG，实时显示每个节点执行到哪一步。
+- 通道：提问直连后端 `POST {BaseUrl}/v1/ask`；执行进度**不走流式**——后端把四段引擎/各节点状态增量写入 `nexus.run/run_stage/run_node`，前端经 **BFF 轮询这三张表**刷新（见 §4.7）。
 
 ### 4.2 追溯抽屉（Lineage）
 - 从提问台或历史进入：把一次回答的**每个数字**摊开——来源、口径、执行耗时、（多源时）合并裁决说明。
-- 通道：随 `/ask` 返回；历史场景走 BFF 读 `run_steps`。
+- 通道：随 `/ask` 返回；历史场景走 BFF 读 `nexus.run_node`（各节点值/来源/口径）。
 
 ### 4.3 运行历史（Runs）
 - 列表：时间、问题、状态、耗时。点开 → 该次的问题 → SQG → 计划 → 结果 → 出处（回放）。
-- 通道：**BFF 直连 DB**（`nexus.runs / run_steps`）。
+- 通道：**BFF 直连 DB**（`nexus.run` 列表；`run_stage` 取四段 I/O 与 plan JSON；`run_node` 取各节点结果）。
 
 ### 4.4 本体管理（Ontology）
 - 概念（Concept）列表 + 编辑：id / kind / 名称 / 同义词 / 语义 / 属性。
@@ -132,9 +132,14 @@ flowchart LR
 
 **技术**：`@vue-flow/core`（+ `background` / `controls` / `minimap`）。节点按依赖分层布局（dagre 或按波次排列）；状态用颜色 + 角标。
 
-**数据来源**：走流式 `POST {BaseUrl}/v1/ask/stream`（SSE），前端按事件逐步更新时间线与 DAG（见 §5）。历史回放则从 `nexus.runs`（SQG/plan）+ `run_steps`（各节点结果）静态重建同一张图。
+**数据来源（DB 轮询，不走流式）**：后端四段引擎执行时把状态**增量写入** `nexus.run/run_stage/run_node`；前端经 BFF **轮询**这三张表渲染：
+- **画结构**（节点/连线/分波）：读 `run_stage`（stage='optimizer'）的 `output` —— 即优化器 plan JSON（`nodes` 自带 `id/operator/name/resolver/depends_on/wave` + `context`），拉一次即可画出整张 DAG。
+- **阶段时间线**：读 `run_stage` 四行的 `state`/`cost_ms`/`input`/`output`。
+- **节点状态上色**：读 `run_node`，按 `node_id` 覆盖颜色（`state`）、值（`value`）、来源（`source`）、实际调用（`call`）；连线颜色随下游节点 `state`。
+- **轮询节奏**：`run.state='running'` 时每 ~0.5s 拉一次，`done/failed` 停止；历史回放读同样三张表（已完成，静态一次）。
 
-> **后端配合（P1+）**：四段引擎在关键节点发出进度事件（编译完成 / 计划完成 / 某节点开始·完成 / 生成完成），由 `/ask/stream` 以 SSE 推给前端。P0 的同步 `/ask` 不带进度；此视图依赖后端上线流式进度。
+> **结构 vs 状态**：结构来自 plan JSON（写一次），状态来自 `run_node`（增量写）——两份数据叠加即得实时 DAG。见后端设计文档 §7.6 / §24。
+> **无需 SSE**：P0 同步 `/ask` 即已把全程落库，此视图纯读 DB，不依赖后端流式接口。
 
 ---
 
@@ -142,10 +147,10 @@ flowchart LR
 
 - 提问：**直连后端** `POST {BaseUrl}/v1/ask` → `{ answer: string, lineage: LineageItem[] }`
   - `LineageItem = { node_id, label, value, resolver, source, detail }`
-- 流式提问（带进度）：**直连后端** `POST {BaseUrl}/v1/ask/stream`（SSE, `text/event-stream`）。事件：
-  - `stage` `{ stage: "compiler|optimizer|coordinator|generator", state: "running|done|error", input?, output? }`
-  - `node`  `{ node_id, name, state: "pending|running|done|error", value?, source?, detail? }`（协调器逐节点）
-  - `answer` `<最终 Answer>`；`error` `{ message }`
+- 执行进度（轮询，非流式）：**BFF 直连 DB** 读运行记录三张表，前端每 ~0.5s 拉一次直到 `run.state≠running`：
+  - `GET api/runs/{run_id}` → `{ run: {...}, stages: RunStage[], nodes: RunNode[] }`
+  - `RunStage = { stage, seq, state, input?, output?, error?, cost_ms }`（optimizer 行的 `output` = plan JSON，画 DAG 用）
+  - `RunNode  = { node_id, state, resolver, call?, output?, value?, source?, trust?, error?, cost_ms }`
 - 本体：`GET api/ontology/concepts`、`POST api/ontology/concepts`（BFF）
 - 源：`GET api/resolvers`、`POST api/resolvers`（BFF，非密）；存密文 **直连后端** `POST {BaseUrl}/v1/credentials`（存 KV）
 - 历史：`GET api/runs?take=50`、`GET api/runs/{run_id}`（BFF）
@@ -158,9 +163,9 @@ flowchart LR
 
 | 阶段 | 前端范围 | 依赖后端 |
 |---|---|---|
-| **U0**（配 P0） | 提问台 + 出处 + 运行历史 | `/ask` 已就绪；BFF 接 `nexus.runs` |
+| **U0**（配 P0） | 提问台 + 出处 + 运行历史 | `/ask` 已就绪；BFF 接 `nexus.run` |
 | **U1**（配 P1） | 本体管理 + 源/LLM 注册 + 编译预览 | 后端 credential/compile API |
-| **U1.5** | 执行过程可视化（VueFlow DAG + 阶段 I/O，实时进度） | 后端 `/ask/stream` 流式进度 |
+| **U1.5** | 执行过程可视化（VueFlow DAG + 阶段 I/O，轮询进度） | 后端把 run/run_stage/run_node 落库（已就绪）|
 | **U2** | 语义图可视化、多源融合裁决展示 | 融合/多节点场景 |
 
 ---
@@ -170,9 +175,9 @@ flowchart LR
 - 已就位：`datanexus.client`（Vue 骨架 + `common/`：API/MSAL/APIService/AppConfig）；`DataNexus.Server`（默认模板）；`DataNexus.Library`（待补 `SqlService`）。
 - 下一步（U0）：
   1. BFF 补 `SqlService`（连 nexus 库）+ `Sql`/`BackendAPI`/`MSAL` 配置段（appsettings）。
-  2. BFF 加 `ConfigController`（下发 `config/BackendAPI`、`config/MSAL` 给前端）+ `RunsController`（直连 `nexus.runs/run_steps`）。**不需要**后端代理控制器——前端直连后端。
+  2. BFF 加 `ConfigController`（下发 `config/BackendAPI`、`config/MSAL` 给前端）+ `RunsController`（直连 `nexus.run/run_stage/run_node`）。**不需要**后端代理控制器——提问直连后端、进度读 DB。
   3. 后端加 CORS 允许 SPA 源（`ALLOWED_ORIGINS` 已有），并按需启用 `require_auth`。
   4. 客户端 `src/bff/Config.ts`（`backendUrl` 助手）+ `src/backend/Ask.ts`（直连后端 `/ask`）+ `src/bff/Runs.ts`；做提问台页面 + 出处卡片 + 历史列表。
 - 执行过程可视化（U1.5）：
-  5. 后端：四段引擎加**进度事件**机制（编译/优化完成、协调器每节点开始·完成、生成完成），新增 `POST /api/v1/ask/stream`（SSE）把事件推给前端。
-  6. 前端：`datanexus.client` 加依赖 `@vue-flow/core`（+ background/controls/minimap）；`src/backend/AskStream.ts` 消费 SSE；提问台加「执行过程面板」= 阶段时间线 + 协调器 VueFlow DAG（实时节点状态）。
+  5. 后端：四段引擎执行进度已由 `RunRecorder` 增量落库（`run/run_stage/run_node`），**无需**流式接口；仅需确保 `DbRunRecorder` 已注册（已完成）。
+  6. 前端：`datanexus.client` 加依赖 `@vue-flow/core`（+ background/controls/minimap）；`src/bff/Runs.ts` 轮询 `api/runs/{id}`；提问台加「执行过程面板」= 阶段时间线（run_stage）+ 协调器 VueFlow DAG（结构来自 optimizer plan JSON、状态来自 run_node）。
