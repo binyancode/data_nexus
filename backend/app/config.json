@@ -28,6 +28,13 @@
         "auth_method": "default",
         "tenant_id": "03d87c9e-bf69-4287-adc9-db61022cf75b"
     },
+    "msal": {
+        "tenant_id": "",
+        "authority": "https://login.microsoftonline.com",
+        "client_id": "",
+        "audience": "",
+        "scopes": ["access_as_user"]
+    },
     "route_prefixes": {
         "api.v1.router": {
             "api_router": "api_router",

@@ -60,6 +60,11 @@ class services(metaclass=service_meta):
         cls._registry[service] = service_entry(service, singleton)
 
     @classmethod
+    def is_registered(cls, service_type: Type) -> bool:
+        """判断某类型是否已注册到容器。"""
+        return service_type in cls._registry
+
+    @classmethod
     def register_default_config(cls, service_type: Type, config_key: str):
         """注册服务类型到 config key 的映射。
 
