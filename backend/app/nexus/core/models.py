@@ -73,6 +73,7 @@ class Operator(str, Enum):
     JOIN = "JOIN"          # 关联
     ASK = "ASK"            # 问一个 Agent
     ACT = "ACT"            # 执行动作
+    PROJECT = "PROJECT"    # 从合并节点结果里取一列（优化器融合后的拆分）
 
 
 class SQGNode(BaseModel):
@@ -137,13 +138,28 @@ class QueryHaving(BaseModel):
     value: Any = None
 
 
+class QuerySelect(BaseModel):
+    """一个输出测度列。
+
+    - P1（同过滤多测度）：直接给 `expr`，渲染成 `expr AS alias`。
+    - P2（不同过滤条件聚合）：给 `agg`+`inner`+`filters`，渲染成
+      `agg(CASE WHEN <filters> THEN inner END) AS alias`（一次扫描分流）。
+    """
+    alias: str          # 输出列名（如 v_n1）
+    expr: str = ""      # P1：完整聚合表达式（已解析成物理列）
+    agg: Optional[str] = None                 # P2：聚合函数 SUM/AVG/MIN/MAX/COUNT
+    inner: Optional[str] = None               # P2：被聚合的内层表达式（物理列）
+    filters: list["QueryFilter"] = Field(default_factory=list)  # P2：该测度专属过滤 → CASE WHEN
+
+
 class QuerySpec(BaseModel):
     """方言中立的取数规格。
 
     优化器负责把逻辑概念解析成物理绑定（表/列/JOIN/别名/表达式），产出本规格；
     具体 SQL 文本由 resolver.compile 按各自方言渲染，优化器不再拼 SQL 字符串。
     """
-    value_expr: str                       # 聚合值表达式（属性已解析成物理列）
+    value_expr: str = ""                  # 单测度聚合表达式（selects 非空时忽略）
+    selects: list[QuerySelect] = Field(default_factory=list)  # 多测度融合；非空则走多列渲染
     label_expr: Optional[str] = None      # 分组维度列引用（None = 不分组）
     from_table: str = ""                  # 首实体物理表
     from_alias: Optional[str] = None      # 多表时首表别名（None = 单表不带别名）

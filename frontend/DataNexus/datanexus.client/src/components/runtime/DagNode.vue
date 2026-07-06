@@ -8,16 +8,19 @@ defineProps<{
     value?: string
     color: string
     selected?: boolean
+    fuseTag?: string        // 优化标记（合并执行 / 拆分），高亮显示
   }
 }>()
 </script>
 
 <template>
-  <div class="dnode" :class="{ sel: data.selected }" :style="{ '--c': data.color }">
+  <div class="dnode" :class="{ sel: data.selected, fuse: !!data.fuseTag }" :style="{ '--c': data.color }">
     <Handle type="target" :position="Position.Left" class="dh" />
     <span class="accent"></span>
     <div class="inner">
-      <div class="name" :title="data.name">{{ data.name }}</div>
+      <div class="name" :title="data.name">
+        <span v-if="data.fuseTag" class="ftag">⚡ {{ data.fuseTag }}</span>{{ data.name }}
+      </div>
       <div class="row">
         <span v-if="data.badge" class="badge">{{ data.badge }}</span>
         <span v-if="data.value" class="val" :title="data.value">{{ data.value }}</span>
@@ -43,6 +46,12 @@ defineProps<{
 .dnode.sel {
   border-color: var(--c);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 18%, transparent), 0 10px 22px rgba(16, 24, 40, 0.12);
+}
+.dnode.fuse { border-color: #7c5cff; }
+.ftag {
+  display: inline-block; margin-right: 5px; vertical-align: 1px;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.02em;
+  color: #ffffff; background: #7c5cff; border-radius: 4px; padding: 0 5px; line-height: 15px;
 }
 .accent { width: 4px; flex: 0 0 auto; background: color-mix(in srgb, var(--c) 78%, #ffffff); }
 .inner {

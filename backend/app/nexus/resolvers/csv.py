@@ -90,9 +90,18 @@ class CsvResolver(Resolver):
         return f"read_csv_auto('{path}')"
 
     # ── QuerySpec → DuckDB SQL（自渲染，与 SqlResolver 无共享）──
-    def compile(self, spec: QuerySpec) -> dict:
-        params: list = []
+    def _cond(self, f, params: list) -> str:
+        """一条过滤渲染成条件串（用于 WHERE 或 CASE WHEN），把值追加进 params。"""
+        if f.op == "IN":
+            vals = f.value if isinstance(f.value, list) else [f.value]
+            params.extend(vals)
+            return f"{f.col} IN ({','.join(['?'] * len(vals))})"
+        # 日期过滤：按 value_format 用 strptime 显式解析，避免隐式转换歧义
+        rhs = f"CAST(strptime(?, '{_to_strptime(f.value_format)}') AS DATE)" if f.value_format else "?"
+        params.append(f.value)
+        return f"{f.col} {f.op} {rhs}"
 
+    def compile(self, spec: QuerySpec) -> dict:
         if spec.from_alias:
             from_sql = f"{self._table_source(spec.from_table)} {spec.from_alias}"
             for j in spec.joins:
@@ -100,20 +109,29 @@ class CsvResolver(Resolver):
         else:
             from_sql = self._table_source(spec.from_table)
 
-        where: list[str] = []
-        for f in spec.filters:
-            if f.op == "IN":
-                vals = f.value if isinstance(f.value, list) else [f.value]
-                where.append(f"{f.col} IN ({','.join(['?'] * len(vals))})")
-                params.extend(vals)
-            else:
-                # 日期过滤：按 value_format 用 strptime 显式解析，避免隐式转换歧义
-                if f.value_format:
-                    rhs = f"CAST(strptime(?, '{_to_strptime(f.value_format)}') AS DATE)"
-                else:
-                    rhs = "?"
-                where.append(f"{f.col} {f.op} {rhs}")
-                params.append(f.value)
+        # 多测度融合：CASE 参数（SELECT 列表）在前、WHERE 参数在后，与 SQL 从左到右一致
+        if spec.selects:
+            sel_params: list = []
+            cols = []
+            for s in spec.selects:
+                if s.filters:               # P2 条件聚合
+                    conds = " AND ".join(self._cond(f, sel_params) for f in s.filters)
+                    cols.append(f"{s.agg}(CASE WHEN {conds} THEN {s.inner} END) AS {s.alias}")
+                else:                       # P1 多测度
+                    cols.append(f"{s.expr} AS {s.alias}")
+            where_params: list = []
+            where = [self._cond(f, where_params) for f in spec.filters]
+            head = (f"{spec.label_expr} AS label, " if spec.label_expr else "") + ", ".join(cols)
+            sql = f"SELECT {head} FROM {from_sql}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            if spec.label_expr:
+                sql += f" GROUP BY {spec.label_expr}"
+            return {"sql": sql, "params": sel_params + where_params}
+
+        # 单测度路径
+        params: list = []
+        where = [self._cond(f, params) for f in spec.filters]
 
         if spec.label_expr:
             sql = f"SELECT {spec.label_expr} AS label, {spec.value_expr} AS value FROM {from_sql}"

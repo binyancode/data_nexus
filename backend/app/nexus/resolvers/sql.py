@@ -58,10 +58,19 @@ class SqlResolver(Resolver):
             return f"TOP ({int(spec.limit)}) ", ""
         return "", ""
 
+    def _cond(self, f, params: list) -> str:
+        """一条过滤渲染成条件串（用于 WHERE 或 CASE WHEN），把值追加进 params。"""
+        if f.op == "IN":
+            vals = f.value if isinstance(f.value, list) else [f.value]
+            params.extend(vals)
+            return f"{f.col} IN ({','.join([self.placeholder] * len(vals))})"
+        # 日期过滤：value_format 存在时显式转 date（ISO 值 TRY_CONVERT 可靠推断）
+        rhs = f"TRY_CONVERT(date, {self.placeholder})" if f.value_format else self.placeholder
+        params.append(f.value)
+        return f"{f.col} {f.op} {rhs}"
+
     def compile(self, spec: QuerySpec) -> dict:
         """QuerySpec → {sql, params}。"""
-        params: list = []
-
         # FROM / JOIN
         if spec.from_alias:
             from_sql = f"{spec.from_table} {spec.from_alias}"
@@ -70,19 +79,30 @@ class SqlResolver(Resolver):
         else:
             from_sql = spec.from_table
 
-        # WHERE
-        where: list[str] = []
-        for f in spec.filters:
-            if f.op == "IN":
-                vals = f.value if isinstance(f.value, list) else [f.value]
-                where.append(f"{f.col} IN ({','.join([self.placeholder] * len(vals))})")
-                params.extend(vals)
-            else:
-                # 日期过滤：value_format 存在时显式转 date（ISO 值 TRY_CONVERT 可靠推断）
-                rhs = f"TRY_CONVERT(date, {self.placeholder})" if f.value_format else self.placeholder
-                where.append(f"{f.col} {f.op} {rhs}")
-                params.append(f.value)
+        # 多测度融合：一条查询出多列（无 TopN/HAVING，融合时已排除）
+        # 参数顺序：SELECT 列表里的 CASE 参数在前，WHERE 参数在后（与 SQL 从左到右一致）
+        if spec.selects:
+            sel_params: list = []
+            cols = []
+            for s in spec.selects:
+                if s.filters:               # P2 条件聚合：agg(CASE WHEN 各自过滤 THEN inner END)
+                    conds = " AND ".join(self._cond(f, sel_params) for f in s.filters)
+                    cols.append(f"{s.agg}(CASE WHEN {conds} THEN {s.inner} END) AS {s.alias}")
+                else:                       # P1 多测度：直接聚合表达式
+                    cols.append(f"{s.expr} AS {s.alias}")
+            where_params: list = []
+            where = [self._cond(f, where_params) for f in spec.filters]
+            head = (f"{spec.label_expr} AS label, " if spec.label_expr else "") + ", ".join(cols)
+            sql = f"SELECT {head} FROM {from_sql}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            if spec.label_expr:
+                sql += f" GROUP BY {spec.label_expr}"
+            return {"sql": sql, "params": sel_params + where_params}
 
+        # 单测度路径
+        params: list = []
+        where = [self._cond(f, params) for f in spec.filters]
         top, tail = self._limit_clause(spec)
 
         if spec.label_expr:

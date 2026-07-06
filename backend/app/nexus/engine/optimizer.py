@@ -9,12 +9,13 @@ resolver 选择优先看 concept 绑定，缺失则按 registry 里的 resolver 
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Optional
 
 from nexus.core.models import (
     SQG, QueryPlan, PlanNode, Operator, ExecContext, topo_waves,
-    QuerySpec, QueryJoin, QueryFilter, QueryHaving,
+    QuerySpec, QueryJoin, QueryFilter, QueryHaving, QuerySelect,
 )
 from nexus.ontology.store import OntologyStore
 
@@ -41,8 +42,22 @@ class Optimizer:
 
     def plan(self, sqg: SQG, ctx: Optional[ExecContext] = None) -> QueryPlan:
         nodes: list[PlanNode] = []
-        for node in sqg.nodes:
-            pn = self._plan_node(node, ctx)
+
+        # 第一层（无依赖）AGGREGATE 参与融合优化；其余节点常规处理。
+        first_ids = {n.id for n in sqg.nodes
+                     if n.operator == Operator.AGGREGATE and not n.depends_on}
+        resolved = []                       # [(sqgnode, spec, resolver)]
+        for n in sqg.nodes:
+            if n.id in first_ids:
+                r = self._agg_spec(n)
+                if r is not None:
+                    resolved.append((n, r[0], r[1]))
+        nodes += self._fuse_aggregates(resolved, sqg, ctx)
+
+        for n in sqg.nodes:
+            if n.id in first_ids:
+                continue                    # 已在融合里处理
+            pn = self._plan_node(n, ctx)
             if pn:
                 nodes.append(pn)
 
@@ -71,10 +86,18 @@ class Optimizer:
 
     # ── AGGREGATE → 下推 SQL ──
     def _plan_aggregate(self, node, ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
+        r = self._agg_spec(node)
+        if r is None:
+            return None
+        spec, resolver = r
+        return self._compile_agg_node(node.id, node.name, spec, resolver,
+                                      list(node.depends_on), ctx)
+
+    # 解析一个 AGGREGATE 节点 → (QuerySpec, resolver)；不编译、不建 PlanNode（供融合先分组）
+    def _agg_spec(self, node):
         expr = self._aggregate_expr(node)
         if not expr:
             return None
-
         filters = node.params.get("filters", [])
         group_by = node.params.get("group_by")
         order = (node.params.get("order") or "desc").lower()
@@ -87,31 +110,164 @@ class Optimizer:
         having = self._clean_having(node.params.get("having"))
         rank = {"group_by": group_by, "order": order, "limit": limit, "having": having} \
             if (group_by or having) else None
-
         resolved = self._resolve_attr_aggregate(expr, filters, rank)
         if resolved is None:
             return None
         spec, resolver = resolved
         if not self._allowed(resolver):
             return None
-        # SQL 文本下沉到 resolver.compile：优化器只交付方言中立的 QuerySpec
+        return spec, resolver
+
+    # QuerySpec + resolver → PlanNode（编译成 call + 落 logs）
+    def _compile_agg_node(self, node_id, name, spec, resolver, depends_on,
+                          ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
         robj = self.registry.resolver(resolver) if self.registry else None
         if robj is None:
             return None
         call = robj.compile(spec)
-        call["node_id"] = node.id
-        # 记录本节点的 QuerySpec 与 resolver 编译出的调用语句（落 optimizer stage 的 logs，供排查）
-        # call 由各源自定义：SQL 源含 {sql, params}，其它源含各自语句，故通用记整个 call
+        call["node_id"] = node_id
+        # 记录本节点的 QuerySpec 与 resolver 编译出的调用语句（落 optimizer stage 的 logs）
         if ctx is not None:
-            ctx.stage_logs.setdefault("nodes", {})[node.id] = {
+            ctx.stage_logs.setdefault("nodes", {})[node_id] = {
                 "query_spec": spec.model_dump(),
                 "call": {k: v for k, v in call.items() if k != "node_id"},
             }
         return PlanNode(
-            id=node.id, operator=node.operator, name=node.name, resolver=resolver,
-            call=call,
-            depends_on=list(node.depends_on),
+            id=node_id, operator=Operator.AGGREGATE, name=name, resolver=resolver,
+            call=call, depends_on=depends_on,
         )
+
+    # ── 融合调度：同一次扫描（同源/表/JOIN/分组）内，按过滤情形派发 P1 / P2 ──
+    def _fuse_aggregates(self, resolved: list, sqg: SQG,
+                         ctx: Optional[ExecContext] = None) -> list:
+        groups: dict[str, list] = {}
+        order: list[str] = []
+        for node, spec, resolver in resolved:
+            # 安全前提：无 TopN、无 HAVING 才可融合（否则单独一个节点）
+            if spec.limit is not None or spec.having is not None:
+                key = f"__solo__{node.id}"
+            else:
+                key = self._scan_key(spec, resolver)      # 不含 filters：同一次扫描
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append((node, spec, resolver))
+
+        out: list = []
+        seq = [0]                                        # 合并节点计数（可变，供递归共享）
+        for key in order:
+            out += self._merge_scan_group(groups[key], sqg, ctx, seq)
+        return out
+
+    def _merge_scan_group(self, members: list, sqg: SQG, ctx, seq: list) -> list:
+        """一个「同扫描」组：同过滤→P1；不同过滤且全单聚合→P2；否则按过滤再分组退回 P1。"""
+        if len(members) == 1:
+            node, spec, resolver = members[0]
+            pn = self._compile_agg_node(node.id, node.name, spec, resolver,
+                                        list(node.depends_on), ctx)
+            return [pn] if pn else []
+
+        same_filter = len({self._filters_key(s) for (_, s, _) in members}) == 1
+        if same_filter:
+            return self._merge_p1(members, sqg, ctx, seq)
+
+        parts = [self._split_single_agg(s.value_expr) for (_, s, _) in members]
+        if all(parts):
+            return self._merge_p2(members, parts, sqg, ctx, seq)
+
+        # 退化：过滤不同 + 有复合口径（难改写 CASE）→ 按过滤再分组，各子组走 P1
+        subs: dict[str, list] = {}
+        suborder: list[str] = []
+        for item in members:
+            k = self._filters_key(item[1])
+            if k not in subs:
+                subs[k] = []
+                suborder.append(k)
+            subs[k].append(item)
+        out: list = []
+        for k in suborder:
+            out += self._merge_scan_group(subs[k], sqg, ctx, seq)
+        return out
+
+    # P1：同过滤、只测度不同 → 过滤上提 WHERE，多测度 select（任意测度/复合口径都行）
+    def _merge_p1(self, members: list, sqg: SQG, ctx, seq: list) -> list:
+        _, base_spec, resolver = members[0]
+        selects = [QuerySelect(alias=f"v_{n.id}", expr=s.value_expr) for (n, s, _) in members]
+        merged_spec = base_spec.model_copy(update={"selects": selects})
+        return self._emit_merge(members, merged_spec, resolver, sqg, ctx, seq, "P1")
+
+    # P2：不同过滤、全单聚合 → agg(CASE WHEN 各自过滤 THEN inner END)，一次扫描分流
+    def _merge_p2(self, members: list, parts: list, sqg: SQG, ctx, seq: list) -> list:
+        _, base_spec, resolver = members[0]
+        selects = []
+        for (n, s, _), (agg, inner) in zip(members, parts):
+            selects.append(QuerySelect(alias=f"v_{n.id}", agg=agg, inner=inner, filters=s.filters))
+        # 合并节点 WHERE 清空（过滤都进了各自 CASE）；保留 from/join/label
+        merged_spec = base_spec.model_copy(update={"selects": selects, "filters": []})
+        return self._emit_merge(members, merged_spec, resolver, sqg, ctx, seq, "P2")
+
+    # 产出：一个合并节点 + 每逻辑 id 一个 PROJECT 拆分节点（P1/P2 共用）
+    def _emit_merge(self, members, merged_spec, resolver, sqg, ctx, seq, tag) -> list:
+        seq[0] += 1
+        merged_id = self._unique_id(f"m{seq[0]}", sqg)
+        mname = "合并取数：" + "+".join(n.name for (n, _, _) in members)
+        mpn = self._compile_agg_node(merged_id, mname, merged_spec, resolver, [], ctx)
+        if mpn is None:                              # 合并失败：退回各自单节点
+            out = []
+            for (n, s, rsv) in members:
+                p = self._compile_agg_node(n.id, n.name, s, rsv, list(n.depends_on), ctx)
+                if p:
+                    out.append(p)
+            return out
+        out = [mpn]
+        for (n, s, rsv) in members:
+            out.append(PlanNode(
+                id=n.id, operator=Operator.PROJECT, name=n.name, resolver="(merge)",
+                call={"node_id": n.id, "from": merged_id, "column": f"v_{n.id}"},
+                depends_on=[merged_id],
+            ))
+        return out
+
+    def _scan_key(self, spec: QuerySpec, resolver: str) -> str:
+        """同一次扫描的键：同源/表/JOIN/分组（不含 filters —— P2 允许过滤不同）。"""
+        return json.dumps({
+            "r": resolver,
+            "from": spec.from_table, "alias": spec.from_alias,
+            "joins": [j.model_dump() for j in spec.joins],
+            "label": spec.label_expr,
+        }, sort_keys=True, ensure_ascii=False, default=str)
+
+    def _filters_key(self, spec: QuerySpec) -> str:
+        return json.dumps([f.model_dump() for f in spec.filters],
+                          sort_keys=True, ensure_ascii=False, default=str)
+
+    _SINGLE_AGG = re.compile(r"\s*(SUM|AVG|MIN|MAX|COUNT)\s*\((.+)\)\s*$", re.IGNORECASE)
+
+    def _split_single_agg(self, expr: str):
+        """把 `AGG(inner)` 拆成 (AGG, inner)；复合口径（SUM(a)-SUM(b) 等）返回 None。"""
+        m = self._SINGLE_AGG.fullmatch(expr or "")
+        if not m:
+            return None
+        inner = m.group(2)
+        depth = 0                                    # 校验 inner 括号平衡、不提前闭合
+        for ch in inner:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    return None
+        if depth != 0:
+            return None
+        return m.group(1).upper(), inner
+
+    def _unique_id(self, base: str, sqg: SQG) -> str:
+        existing = {n.id for n in sqg.nodes}
+        cand, i = base, 0
+        while cand in existing:
+            i += 1
+            cand = f"{base}_{i}"
+        return cand
 
     # 取聚合表达式：优先 metric 口径；否则用 measure 属性 + agg 函数（临时聚合）
     def _aggregate_expr(self, node) -> Optional[str]:

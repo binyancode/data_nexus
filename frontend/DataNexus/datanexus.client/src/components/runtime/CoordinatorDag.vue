@@ -1,18 +1,21 @@
 <template>
   <div class="dag-wrap">
     <div v-if="!planNodes.length" class="dag-empty">暂无执行图</div>
+    <button v-if="planNodes.length" class="dag-reset" title="恢复自动布局" @click="resetLayout">⟲ 自动布局</button>
     <VueFlow
-      v-else
+      v-if="planNodes.length"
       :nodes="nodes"
       :edges="edges"
       :node-types="nodeTypes"
       :fit-view-on-init="true"
-      :nodes-draggable="false"
+      :nodes-draggable="true"
       :nodes-connectable="false"
       :zoom-on-scroll="false"
       :prevent-scrolling="false"
       class="dag-canvas"
       @node-click="onNodeClick"
+      @node-drag-stop="onNodeDragStop"
+      @pane-click="selectedId = null"
     >
       <Background pattern-color="#d9e2ee" :gap="24" :size="1.3" />
       <Controls :show-interactive="false" />
@@ -40,8 +43,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, markRaw, ref } from 'vue'
-import { VueFlow } from '@vue-flow/core'
+import { computed, markRaw, nextTick, ref } from 'vue'
+import { VueFlow, useVueFlow } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
 import '@vue-flow/core/dist/style.css'
@@ -69,6 +72,19 @@ const props = defineProps<{
 
 const planNodes = computed<PlanNode[]>(() => props.plan?.nodes ?? [])
 const selectedId = ref<string | null>(null)
+const { fitView } = useVueFlow()
+
+// 拖动后的位置覆盖（id → 坐标）；空则用自动布局。恢复布局 = 清空。
+const posOverride = ref<Record<string, { x: number; y: number }>>({})
+const layoutPos = computed(() => positionMap(computeWaves(planNodes.value)))
+
+function onNodeDragStop(e: { node: { id: string; position: { x: number; y: number } } }) {
+  posOverride.value = { ...posOverride.value, [e.node.id]: { ...e.node.position } }
+}
+function resetLayout() {
+  posOverride.value = {}
+  nextTick(() => fitView({ padding: 0.15 }))
+}
 
 function st(id: string): string {
   return props.nodeStates?.[id]?.state ?? 'pending'
@@ -79,27 +95,75 @@ function stateLabel(s?: string | null): string {
 
 const nodes = computed(() => {
   const ns = planNodes.value
-  const pos = positionMap(computeWaves(ns))
+  const pos = layoutPos.value
+  const over = posOverride.value
+  // 合并节点 = 被某个 PROJECT 节点依赖的节点（融合优化产物）
+  const mergeIds = new Set<string>()
+  for (const n of ns) {
+    if (n.operator === 'PROJECT') (n.depends_on ?? []).forEach((d) => mergeIds.add(d))
+  }
   return ns.map((n) => {
     const s = st(n.id)
     const rn = props.nodeStates?.[n.id]
     const raw = rn?.value != null && rn.value !== '' ? String(rn.value) : stateLabel(s)
     const tail = raw.length > 26 ? raw.slice(0, 26) + '…' : raw
+    const isMerge = mergeIds.has(n.id)
+    const isProject = n.operator === 'PROJECT'
     return dagNode(
       n.id,
-      pos.get(n.id) ?? { x: 0, y: 0 },
+      over[n.id] ?? pos.get(n.id) ?? { x: 0, y: 0 },
       {
         name: n.name || n.id,
-        badge: n.operator,
+        badge: isProject ? '拆分' : n.operator,
         value: tail,
         color: stateColor(s),
         selected: n.id === selectedId.value,
+        fuseTag: isMerge ? '合并执行' : isProject ? '拆分' : undefined,
       },
       s === 'running' ? 'rn-pulse' : '',
     )
   })
 })
-const edges = computed(() => buildEdges(planNodes.value, (id) => st(id)))
+
+// 选中节点的上游 + 下游相关连线 id（点击后闪光）
+const relatedEdgeIds = computed<Set<string>>(() => {
+  const sel = selectedId.value
+  const out = new Set<string>()
+  if (!sel) return out
+  const ns = planNodes.value
+  const parents = new Map<string, string[]>()   // id → 依赖(上游)
+  const children = new Map<string, string[]>()  // id → 被谁依赖(下游)
+  for (const n of ns) {
+    parents.set(n.id, n.depends_on ?? [])
+    for (const d of n.depends_on ?? []) {
+      if (!children.has(d)) children.set(d, [])
+      children.get(d)!.push(n.id)
+    }
+  }
+  const up = new Set<string>([sel])
+  const down = new Set<string>([sel])
+  const su = [sel]
+  while (su.length) { const x = su.pop()!; for (const p of parents.get(x) ?? []) if (!up.has(p)) { up.add(p); su.push(p) } }
+  const sd = [sel]
+  while (sd.length) { const x = sd.pop()!; for (const c of children.get(x) ?? []) if (!down.has(c)) { down.add(c); sd.push(c) } }
+  for (const n of ns) for (const d of n.depends_on ?? []) {
+    if ((up.has(d) && up.has(n.id)) || (down.has(d) && down.has(n.id))) out.add(`${d}->${n.id}`)
+  }
+  return out
+})
+
+const edges = computed(() => {
+  const rel = relatedEdgeIds.value
+  return buildEdges(planNodes.value, (id) => st(id)).map((e) => {
+    const on = rel.has(e.id as string)
+    return {
+      ...e,
+      class: on ? 'edge-hl' : '',                       // 显式清空，取消选择后不残留
+      animated: on ? true : e.animated,
+      style: on ? { ...(e.style as object), strokeWidth: 2.6 } : e.style,
+    }
+  })
+})
 
 const selected = computed(() => planNodes.value.find((n) => n.id === selectedId.value) || null)
 const state = computed<RunNode | undefined>(() =>
@@ -128,6 +192,16 @@ function onNodeClick(e: { node: { id: string } }) {
   background: #f4f8fd;
 }
 .dag-canvas { width: 100%; height: 100%; }
+.dag-reset {
+  position: absolute;
+  top: 10px; left: 10px; z-index: 5;
+  font-size: 12px; color: #3f566f; cursor: pointer;
+  background: #fff; border: 1px solid #dbe5f2; border-radius: 8px;
+  padding: 4px 10px; line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(20, 40, 70, 0.12);
+  transition: background 0.15s, border-color 0.15s;
+}
+.dag-reset:hover { background: #f1f6fb; border-color: #7c5cff; color: #5b3fd6; }
 .dag-empty {
   height: 100%;
   display: flex;
@@ -150,6 +224,10 @@ function onNodeClick(e: { node: { id: string } }) {
 @keyframes rnpulse {
   0%, 100% { filter: drop-shadow(0 0 2px rgba(47, 124, 180, 0.26)); }
   50% { filter: drop-shadow(0 0 10px rgba(47, 124, 180, 0.68)); }
+}
+/* 选中节点的上下游连线高亮：柔和发光 + 流动虚线（animated），不刺眼 */
+:deep(.vue-flow__edge.edge-hl .vue-flow__edge-path) {
+  filter: drop-shadow(0 0 3px rgba(124, 92, 255, 0.55));
 }
 .node-detail {
   position: absolute;

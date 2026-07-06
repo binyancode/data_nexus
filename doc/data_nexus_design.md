@@ -31,7 +31,7 @@
 
 **第三部分 · 前端设计**：30 前端设计（待补）
 
-**第四部分 · as-built 实现细化（2026-07）**：31 本体数据模型（role/dtype/additivity、graph JSON、刷新）· 32 AGGREGATE 增强（临时聚合/filter op/TopN/HAVING/可加性）· 33 Resolver 能力与本体作用域 · 34 规划 LLM 按 run 选择 · 35 凭据/LLM/源 管理 · 36 运行入口与工程细节 · 37 取数下沉：QuerySpec + 方言
+**第四部分 · as-built 实现细化（2026-07）**：31 本体数据模型（role/dtype/additivity、graph JSON、刷新）· 32 AGGREGATE 增强（临时聚合/filter op/TopN/HAVING/可加性）· 33 Resolver 能力与本体作用域 · 34 规划 LLM 按 run 选择 · 35 凭据/LLM/源 管理 · 36 运行入口与工程细节 · 37 取数下沉：QuerySpec + 方言 · 38 CSV 源 + 本地文件凭据(DuckDB) · 39 日期区间过滤 / value_format / 属性描述 · 40 聚合融合优化（合并执行 + 拆分）· 41 自定义日志(logs)
 
 ---
 
@@ -1326,7 +1326,9 @@ SQG(逻辑)
 
 ### 37.6 CSV 展望（暂缓）
 
-CSV 走同一 `QuerySpec` 接缝无障碍：`CsvResolver.compile` 用 DuckDB `read_csv(path)` 把 spec 渲染成 SQL（DuckDB 即一种方言子类）。**难点在文件获取**——绑定的不是「表」而是「文件/对象的定位方式」：本地路径 / Blob 容器+SAS / S3 / HTTP / 上传流，鉴权与生命周期各异。需在 binding 引入 `kind=file` + 独立的「文件寻址/凭据」抽象（与 SQL 连接凭据两套模型）。待 SQL 这套跑顺后单独设计。
+CSV 走同一 `QuerySpec` 接缝无障碍：`CsvResolver.compile` 用 DuckDB `read_csv(path)` 把 spec 渲染成 SQL（DuckDB 即一种方言子类）。**难点在文件获取**——绑定的不是「表」而是「文件/对象的定位方式」：本地路径 / Blob 容器+SAS / S3 / HTTP / 上传流，鉴权与生命周期各异。需在 binding 引入 `kind=file` + 独立的「文件寻址/凭据」抽象（与 SQL 连接凭据两套模型）。
+
+> 更新：CSV（本地文件）已落地，见 §38。
 
 
 ## 36. 运行入口与其它工程细节（as-built）
@@ -1335,4 +1337,86 @@ CSV 走同一 `QuerySpec` 接缝无障碍：`CsvResolver.compile` 用 DuckDB `re
 - **路由配置驱动**：`api/v1/router.py` 从 `config.route_prefixes` 动态挂载端点（`ask/resolvers/credentials/me`）。
 - **生成器多行渲染**：AGGREGATE 分组结果（`label+value` 多行）渲染成列表并入血缘。
 - **迁移脚本**：`app/migrate_attr_types.py` 一次性把存量本体属性迁到新枚举（role→dimension/measure，补 dtype/additivity），保留用户名称/同义词/指标/挂载源。
+
+## 38. CSV 源 + 本地文件凭据（DuckDB，as-built）
+
+`CsvResolver` 把本地文件夹里的 CSV 当数据源，用 **DuckDB** 执行；与 `SqlResolver` **完全独立、零耦合**（各自 compile/fetch/describe），resolver 之间不共享 SQL 渲染。
+
+### 38.1 凭据：一个 resolver 可对应多种凭据类型
+- 新增凭据类型 `local_file`（`services/credential.py`）：`base_dir`（必填）+ `filename`（可选）。以后 `azure_blob` 等按同机制加类即可。
+- 前端 `RESOLVER_CRED_TYPE` 从 `resolver_type→单个类型` 改为 **1:N 数组**（`csv:['local_file']`）；源管理页按数组过滤兼容凭据。
+
+### 38.2 `filename` 决定实体粒度（describe 据此枚举）
+| filename | 实体 | binding.expr | 运行时 |
+|---|---|---|---|
+| 空 | 整个文件夹一个实体 | `*.csv` | `read_csv_auto('<base>/*.csv', union_by_name=true)` |
+| 具体名 `orders.csv` | 单文件一个实体 | `orders.csv` | `read_csv_auto('<base>/orders.csv')` |
+| 通配 `sales_*.csv` | 每个匹配文件各一个实体 | 各真实文件名 | 各自 `read_csv_auto(...)` |
+
+规则：**空 = 文件夹级；填了任何值（含通配符）= 文件级**。优化器/QuerySpec 完全不用改，`from_table` 就是该 expr，`_table_source` 才包成 `read_csv_auto`（glob 补 `union_by_name`）。
+
+### 38.3 关键工程点
+- **线程安全**：协调器同波并行执行多节点，`CsvResolver.fetch` **每次用独立的内存 DuckDB 连接**（共享单连接会串结果 —— 曾导致「2024 节点拿到 2023 的值」）。describe/sample 单线程调用，用共享连接。
+- **路径防穿越**：`realpath(base_dir/locator)` 必须落在 `realpath(base_dir)` 下，否则拒绝；文件名进 `read_csv_auto` 前转义单引号。
+- **导入取名**：`importer._local` 剥离 `.csv` 等扩展名并取 basename（否则 `orders.csv` 会被命名成 `csv`、多文件撞名）。
+- **导入向导按能力过滤**：`provides_concepts===true`（非硬编码 `type==='sql'`），CSV 也能进导入向导。
+- 依赖：`duckdb>=1.5`（`requirements.txt`）。
+
+## 39. 日期区间过滤 / value_format / 属性描述（as-built）
+
+针对「日粒度日期列上的月/季/年过滤」（`order_date = '2024-07'` 会报错、语义也不对）：
+
+- **区间在编译器表达**：编译器规则——date 类型属性的期间过滤**必须用半开区间**：某月/季/年 = `>= 起始日` 且 `< 下一期间起始日`（两个 filter，值用完整 `yyyy-MM-dd`）。不再拿日期列等于「年-月」字符串。
+- **`value_format`**：每个 date 过滤带格式（token 式如 `yyyy-MM-dd`），`QueryFilter.value_format` 贯穿 编译器 `_clean_filters` → 优化器 `_build_where` → resolver。resolver 据此显式解析：CSV `CAST(strptime(?, '%Y-%m-%d') AS DATE)`、SQL Server `TRY_CONVERT(date, ?)`。无 value_format 的普通过滤（地区等）走原 `?`。
+- **属性「描述」字段**（复用 `semantics`）：本体编辑器给每个属性加「描述（给大模型的提示）」，喂进编译器属性清单。用于字符串型日期列（如 `period` 存 `2025Q1`）——描述里写明格式，用户说「2025年第一季度」LLM 就生成 `value:"2025Q1"` 等值过滤。**取值格式来自本体描述、不硬编码任何业务值**（曾删掉写死 `华东/2024Q1` 的提示词）。
+
+## 40. 聚合融合优化（合并执行 + 拆分，as-built）
+
+优化器把第一层（无依赖）**同一次扫描**的 AGGREGATE 融合成一条查询（一次扫描），再拆回各逻辑节点。按过滤情形分两档策略（**P1 同过滤 / P2 不同过滤**），共用「拆分归位」管线。
+
+### 40.0 调度：按「同一次扫描」分组，再选策略
+- 外层分组键 = **scan-key** `(resolver, FROM/JOIN, group_by)`——**不含 filters**（P2 允许过滤不同）。前提：**无 TopN、无 HAVING**（否则该节点单独执行）。
+- 每个 scan 组（≥2 成员）判定：
+  - **所有 filters 相同 → P1**（过滤上提 WHERE + 多测度 select，任意口径/复合指标都行）。
+  - **filters 不同 且 全是单聚合 `AGG(x)` → P2**（条件聚合 CASE，一次扫描分流）。
+  - **否则退化**（过滤不同 + 有复合口径难改写）：按 filters 再分子组，各子组走 P1，跨过滤不合。
+- 单聚合识别：`AGG(inner)` 正则 + 括号平衡校验；`SUM(a)-SUM(b)` 等复合口径被拒（不走 P2）。
+
+### 40.1 P1：同过滤、只测度不同（多测度 select）
+`SELECT [label,] SUM(quantity) AS v_nA, SUM(amount) AS v_nB FROM t WHERE <公共过滤> GROUP BY city`。**filters 必须逐条相同**——否则如「2023 vs 2024 总销售」会被误合成一个总数。
+
+### 40.2 P2：不同过滤、单聚合（条件聚合 CASE）
+把各成员的过滤塞进 CASE，一次扫描分流：
+```sql
+SELECT SUM(CASE WHEN <2023区间> THEN amount END) AS v_n23,
+       SUM(CASE WHEN <2024区间> THEN amount END) AS v_n24
+FROM sales            -- 表只读一遍
+```
+- **正确性**：SUM/AVG/MIN/MAX/COUNT 都对 CASE 产生的 NULL 天然忽略 → `AGG(CASE WHEN f THEN x END)` = `AGG(x) WHERE f`（COUNT 也成立，无需 `SUM(CASE..1..)` 特判）。实测 n23/n24 与单查询逐位一致。
+- **比 UNION ALL 强**：UNION ALL 各分支独立扫描（不省扫描，只省往返）；CASE 才是真正 2 次→1 次扫描。
+- **参数顺序（易错点）**：CASE 的 `?` 在 SELECT 列表、早于 WHERE。resolver 编译时**先收 select 的参数、再收 WHERE 的**，与 SQL 从左到右一致。`_cond(f, params)` 统一渲染一条过滤（WHERE 与 CASE 共用，含 value_format 日期包装）。
+
+### 40.3 直接产出合并计划（不「先建再融」）
+- 优化器先把第一层 AGGREGATE 解析成 spec（不建 PlanNode），按上述键分组、选策略。
+- 合并节点 `m{n}`：`QuerySpec.selects`——P1 用 `(alias, expr)`；P2 用 `(alias, agg, inner, filters)`（渲染成 `agg(CASE WHEN filters THEN inner END)`）。
+- 每个逻辑 id 一个 **`PROJECT` 节点**（新算子）：`call={from: 合并节点, column: v_nX}`，`depends_on=[合并节点]`。
+
+### 40.4 拆分归位（下游零改动）
+协调器对 PROJECT 节点不调 resolver，直接从 `ctx.results[合并节点]` 取该列、投影成等价单聚合结果写回 `ctx.results[逻辑id]`。因为回填 `{nX}`、血缘、生成器都读 `ctx.results[逻辑id]`，**全部照旧工作**；合并节点只在 plan（执行图）里，不在 SQG 里，天然不入答案/血缘。
+
+### 40.5 双视图 + 醒目
+- **SQG 视图**：逻辑节点（nA/nB/ASK）不变。
+- **执行计划 DAG**：`合并节点 → PROJECT 拆分节点 → 下游`，合并节点打「⚡合并执行」、PROJECT 打「⚡拆分」紫色标签 + 紫边（前端自动识别：被 PROJECT 依赖的即合并节点）。直观展示「N 次扫描优化成 1 次」。
+
+## 41. 自定义日志（logs，as-built）
+
+## 41. 自定义日志（logs，as-built）
+
+`run_stage` / `run_node` 各加 `logs NVARCHAR(MAX)`（JSON），存排查用的自定义记录：
+- **编译器**：完整提示词 → `run_stage.logs`（compiler 段）`{prompt:{system,user}}`。
+- **优化器**：每节点的 `QuerySpec` + resolver 编译出的 call → `run_stage.logs`（optimizer 段）`{nodes:{nX:{query_spec, call}}}`（call 通用，SQL 源即 `{sql,params}`）。
+- **ASK**：生成的完整提示词 → `run_node.logs` `{prompt:{system,user}}`。
+- **取数节点**：resolver 返回行数 → `run_node.logs` `{row_count}`（非 ASK/ACT）。
+
+机制：`ExecContext.stage_logs` 每段前清空、段末序列化写 `finish_stage`；`NodeResult.logs` 由 resolver 填、协调器写 `finish_node`。空则不落列（NULL）。
 

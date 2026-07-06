@@ -83,7 +83,9 @@ class Coordinator:
             return
 
         resolver = self.registry.resolver(node.resolver)
-        if not resolver:
+        if node.operator == Operator.PROJECT:
+            res = self._project(node, call, ctx)          # 融合拆分：从合并节点取一列，不调 resolver
+        elif not resolver:
             res = NodeResult(node_id=node.id, resolver=node.resolver,
                              error=f"resolver not found: {node.resolver}")
         else:
@@ -106,6 +108,25 @@ class Coordinator:
             res.source, res.trust, res.error, int((time.time() - t0) * 1000),
             (_dumps(node_logs) if node_logs else None),
         )
+
+    # ── 融合拆分：从合并节点结果里取一列，产出与单聚合等价的 NodeResult ──
+    def _project(self, node: PlanNode, call: dict, ctx: ExecContext) -> NodeResult:
+        src = ctx.results.get(call.get("from"))
+        col = call.get("column")
+        if src is None:
+            return NodeResult(node_id=node.id, resolver="(merge)",
+                              error=f"merge source not found: {call.get('from')}")
+        rows = []
+        for r in (src.rows or []):
+            row = {}
+            if "label" in r:
+                row["label"] = r["label"]
+            row["value"] = r.get(col)
+            rows.append(row)
+        cols = ["label", "value"] if (rows and "label" in rows[0]) else ["value"]
+        return NodeResult(node_id=node.id, resolver="(merge)", output=rows,
+                          columns=cols, rows=rows, source=src.source,
+                          detail=f"从合并节点 {call.get('from')} 取列 {col}")
 
     # ── 回填 {nX} ──
     def _backfill(self, call, results: dict[str, NodeResult]):
