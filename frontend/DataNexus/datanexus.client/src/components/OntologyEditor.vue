@@ -11,6 +11,7 @@
       </div>
       <div class="oe-actions" v-if="meta?.canEdit">
         <el-button size="small" @click="importOpen = true">导入实体</el-button>
+        <el-button size="small" @click="refreshAll">刷新结构</el-button>
         <el-button size="small" @click="publishOpen = true">发布</el-button>
         <el-button size="small" type="primary" :loading="saving" @click="save">保存</el-button>
       </div>
@@ -36,7 +37,13 @@
       <aside class="oe-side" :style="{ width: sideWidth + 'px' }">
         <!-- 实体检视 -->
         <template v-if="selEntity">
-          <div class="side-h"><span>实体 · {{ selEntity.name }}</span><button class="x" @click="selEntityId = null">✕</button></div>
+          <div class="side-h">
+            <span>实体 · {{ selEntity.name }}</span>
+            <span class="sh-actions">
+              <button v-if="meta?.canEdit" class="sh-refresh" title="从数据库刷新该表结构" @click="refreshEntity(selEntity)">⟳</button>
+              <button class="x" @click="selEntityId = null">✕</button>
+            </span>
+          </div>
           <div class="fld"><label>名称</label><el-input v-model="selEntity.name" :disabled="!meta?.canEdit" size="small" /></div>
           <div class="fld"><label>语义</label><el-input v-model="selEntity.semantics" type="textarea" :rows="2" :disabled="!meta?.canEdit" /></div>
           <div class="fld"><label>物理表</label><el-input :model-value="selEntity.table || ''" disabled size="small" class="mono" /></div>
@@ -46,27 +53,44 @@
             </el-select>
           </div>
           <div class="attr-list">
-            <div class="al-h">字段（{{ selEntity.attributes.length }}）· 开=维度可过滤，关=度量</div>
+            <div class="al-h">
+              <span>字段（{{ selEntity.attributes.length }}）· 维度可过滤/分组，度量可计算/过滤</span>
+              <el-switch v-if="meta?.canEdit" :model-value="allAttrsEnabled" size="small"
+                         title="全部启用 / 全部停用" @update:model-value="toggleAllAttrs" />
+            </div>
             <template v-for="a in selEntity.attributes" :key="a.id">
-              <div class="al-row">
-                <span class="al-caret" :class="{ on: a.role, open: selAttrId === a.id }">
-                  {{ a.role ? (selAttrId === a.id ? '▾' : '▸') : '' }}
-                </span>
-                <span class="al-name" :class="{ clickable: a.role }"
-                      @click="a.role && toggleAttr(a)">{{ a.name }}</span>
-                <el-switch :model-value="!!a.role" :disabled="!meta?.canEdit"
-                           @update:model-value="(v:any) => setAttrRole(a, v)" />
+              <div class="al-row" :class="{ off: a.enabled === false }">
+                <span class="al-caret" @click="toggleAttr(a)">{{ selAttrId === a.id ? '▾' : '▸' }}</span>
+                <span class="al-name clickable" @click="toggleAttr(a)">{{ a.name }}</span>
+                <span class="al-dtype">{{ a.dtype || '?' }}</span>
+                <span class="al-role" :class="a.role || 'dimension'">{{ a.role === 'measure' ? '度量' : '维度' }}</span>
+                <el-switch :model-value="a.enabled !== false" :disabled="!meta?.canEdit" size="small"
+                           @update:model-value="(v:any) => setAttrEnabled(a, v)" />
               </div>
-              <div v-if="a.role && selAttrId === a.id" class="al-edit">
+              <div v-if="selAttrId === a.id" class="al-edit">
                 <div class="fld"><label>名称</label>
                   <el-input v-model="a.name" :disabled="!meta?.canEdit" size="small" placeholder="业务名称" />
+                </div>
+                <div class="fld"><label>角色</label>
+                  <el-select :model-value="a.role || 'dimension'" :disabled="!meta?.canEdit" size="small" style="width:100%"
+                             @update:model-value="(v:any) => setAttrRole(a, v)">
+                    <el-option value="dimension" label="维度（可过滤 / 可分组）" />
+                    <el-option value="measure" label="度量（可计算 / 可过滤）" />
+                  </el-select>
+                </div>
+                <div class="fld" v-if="a.role === 'measure'"><label>可加性（计算指导）</label>
+                  <el-select v-model="a.additivity" :disabled="!meta?.canEdit" size="small" style="width:100%">
+                    <el-option value="additive" label="可累加（任意维度可 SUM）" />
+                    <el-option value="semi_additive" label="半可加（跨时间不可 SUM，如库存/余额）" />
+                    <el-option value="non_additive" label="不可累加（比率/百分比/单价，禁 SUM）" />
+                  </el-select>
                 </div>
                 <div class="fld"><label>同义词</label>
                   <el-select v-model="a.synonyms" multiple filterable allow-create default-first-option
                              :disabled="!meta?.canEdit" size="small" style="width:100%" placeholder="回车添加" />
                 </div>
-                <div class="fld"><label>物理列</label>
-                  <el-input :model-value="a.column || ''" disabled size="small" class="mono" />
+                <div class="fld"><label>物理列 · 类型</label>
+                  <el-input :model-value="`${a.column || ''}  ·  ${a.dtype || '?'}`" disabled size="small" class="mono" />
                 </div>
               </div>
             </template>
@@ -76,6 +100,21 @@
 
         <!-- 概念列表：指标 / 派生 / 动作 -->
         <template v-else>
+          <!-- 本体能力源（挂载的 resolver）：SQL 随实体自动，agent/action 手动 -->
+          <div class="rsrc">
+            <div class="rsrc-h">
+              <span>能力源（{{ (graph.resolvers || []).length }}）</span>
+              <el-button v-if="meta?.canEdit" size="small" text @click="attachOpen = true">＋ 挂载</el-button>
+            </div>
+            <div v-if="(graph.resolvers || []).length" class="rsrc-list">
+              <span v-for="r in graph.resolvers" :key="r.name" class="rsrc-chip" :class="r.type">
+                <span class="rc-dot"></span>{{ r.name }}<span class="rc-type">{{ r.type }}</span>
+                <button v-if="meta?.canEdit && r.type !== 'sql'" class="rc-x" title="卸载" @click="detachResolver(r.name)">✕</button>
+              </span>
+            </div>
+            <div v-else class="rsrc-empty">未挂载任何源。导入实体会自动挂 SQL 源；agent/action 点「挂载」。</div>
+          </div>
+
           <div class="seg3">
             <button v-for="t in tabs" :key="t.k" :class="{ on: tab === t.k }" @click="tab = t.k">{{ t.label }}</button>
           </div>
@@ -169,6 +208,22 @@
     </el-dialog>
 
     <ImportWizard v-model="importOpen" @imported="onImported" />
+
+    <!-- 挂载能力源（无 concept 的 resolver：agent/action） -->
+    <el-dialog v-model="attachOpen" title="挂载能力源" width="440px">
+      <div class="fld">
+        <label>选择一个能力源（agent / action）</label>
+        <el-select v-model="attachPick" style="width:100%" placeholder="选择 resolver" filterable>
+          <el-option v-for="r in attachable" :key="r.name" :value="r.name"
+                     :label="`${r.name}（${r.type}）`" />
+        </el-select>
+        <div v-if="!attachable.length" class="hint">没有可挂载的能力源。请先到「源管理」新增 agent / action 源。</div>
+      </div>
+      <template #footer>
+        <el-button @click="attachOpen = false">取消</el-button>
+        <el-button type="primary" :disabled="!attachPick" @click="attachResolver">挂载</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -185,6 +240,7 @@ import {
   type OntologyFull, type OntologyGraph, type OntologyMeta,
 } from '../bff/Ontology.js'
 import type { ImportFragment } from '../backend/Resolvers.js'
+import { listResolvers, resolverSchema, type ResolverInfo } from '../backend/Resolvers.js'
 
 const props = defineProps<{ ontologyId: string }>()
 defineEmits<{ (e: 'back'): void }>()
@@ -220,6 +276,8 @@ function startResize(e: MouseEvent) {
 
 onMounted(load)
 async function load() {
+  // 先拿到 resolver 能力（provides_concepts），syncSqlResolvers 才能正确区分能力源
+  try { allResolvers.value = await listResolvers() } catch { /* ignore */ }
   try {
     const o: OntologyFull = await getOntology(props.ontologyId)
     meta.value = o
@@ -229,8 +287,50 @@ async function load() {
     graph.value = {
       entities: g.entities || [], relations: g.relations || [],
       metrics: g.metrics || [], derivations: g.derivations || [], actions: g.actions || [],
+      resolvers: g.resolvers || [],
     }
+    syncSqlResolvers()
   } catch (e: any) { ElMessage.error('加载失败：' + (e?.message || e)) }
+}
+
+// ── 本体挂载的 resolver（能力集）──
+const allResolvers = ref<ResolverInfo[]>([])
+const attachOpen = ref(false)
+const attachPick = ref('')
+
+function resolverType(nm: string): string {
+  return allResolvers.value.find((r) => r.name === nm)?.type || 'sql'
+}
+// 无 concept 的可挂能力源（agent/action 等），且尚未挂载
+const attachable = computed(() =>
+  allResolvers.value.filter((r) => r.provides_concepts === false
+    && !(graph.value.resolvers || []).some((x) => x.name === r.name)),
+)
+// SQL 源随实体自动挂载/摘除：把实体引用到的 resolver 补进来；不再被任何实体引用的“有concept源”摘除
+function syncSqlResolvers() {
+  const list = graph.value.resolvers || (graph.value.resolvers = [])
+  const referenced = new Set(graph.value.entities.map((e) => (e as any).resolver).filter(Boolean))
+  for (const nm of referenced) {
+    if (!list.some((x) => x.name === nm)) list.push({ name: nm, type: resolverType(nm) })
+  }
+  // 摘除：仅对**已知有 concept 的源**（SQL）在无实体引用时摘除；agent/action 等手动挂载的保留
+  graph.value.resolvers = list.filter((x) => {
+    const info = allResolvers.value.find((r) => r.name === x.name)
+    const conceptful = info?.provides_concepts === true
+    return conceptful ? referenced.has(x.name) : true
+  })
+}
+function attachResolver() {
+  if (!attachPick.value) return
+  const list = graph.value.resolvers || (graph.value.resolvers = [])
+  if (!list.some((x) => x.name === attachPick.value)) {
+    list.push({ name: attachPick.value, type: resolverType(attachPick.value) })
+  }
+  attachPick.value = ''
+  attachOpen.value = false
+}
+function detachResolver(nm: string) {
+  graph.value.resolvers = (graph.value.resolvers || []).filter((x) => x.name !== nm)
 }
 
 // ── 画板交互 ──
@@ -241,10 +341,62 @@ const selAttrId = ref<string | null>(null)
 function toggleAttr(a: any) {
   selAttrId.value = selAttrId.value === a.id ? null : a.id
 }
-function setAttrRole(a: any, on: boolean) {
-  a.role = on ? (a.column || a.name) : null
-  if (!on && selAttrId.value === a.id) selAttrId.value = null
-}function onLayout(id: string, x: number, y: number) {
+function setAttrRole(a: any, role: string) {
+  a.role = role
+  if (role === 'measure') {
+    if (!a.additivity) a.additivity = 'additive'
+  } else {
+    a.additivity = null
+  }
+}
+// 启用/停用：停用的属性不进编译器/查询（默认 undefined = 启用）
+const allAttrsEnabled = computed(() => (selEntity.value?.attributes || []).every((a: any) => a.enabled !== false))
+function setAttrEnabled(a: any, v: boolean) { a.enabled = v }
+function toggleAllAttrs(v: boolean) {
+  for (const a of (selEntity.value?.attributes || []) as any[]) a.enabled = v
+}
+
+// ── 从数据库刷新表结构（只改结构属性 column/dtype，保留用户的 role/additivity/名称/同义词/语义）──
+async function refreshEntity(ent: any): Promise<number> {
+  if (!ent?.table || !ent?.resolver) return 0
+  let schema: any
+  try { schema = await resolverSchema(ent.resolver) } catch { ElMessage.error('探测失败'); return 0 }
+  const cols: Array<{ column: string; dtype?: string }> = (schema?.tables || {})[ent.table] || []
+  if (!cols.length) { ElMessage.warning(`表 ${ent.table} 未探测到字段`); return 0 }
+  const byCol = new Map(cols.map((c) => [c.column, c]))
+  const existing = new Map((ent.attributes as any[]).map((a) => [a.column || a.name, a]))
+  const local = (t: string) => (t.split('.').pop() || t).replace(/[^A-Za-z0-9_]/g, '_')
+  let added = 0, removed = 0
+  // 更新已有列的结构属性；新增列按 dtype 定默认角色
+  for (const c of cols) {
+    const cur = existing.get(c.column)
+    if (cur) {
+      cur.dtype = c.dtype || 'unknown'   // 结构属性可更新；role/additivity/name/synonyms 保留
+    } else {
+      const dt = c.dtype || 'unknown'
+      const isPk = ent.key && c.column === ent.key
+      const role = (isPk || dt !== 'number') ? 'dimension' : 'measure'
+      ent.attributes.push({
+        id: `attribute.${local(ent.table)}.${c.column}`, name: c.column, column: c.column,
+        role, dtype: dt, additivity: role === 'measure' ? 'additive' : null, synonyms: [], semantics: null,
+      })
+      added++
+    }
+  }
+  // 移除数据库里已不存在的列
+  const before = ent.attributes.length
+  ent.attributes = (ent.attributes as any[]).filter((a) => byCol.has(a.column || a.name))
+  removed = before - ent.attributes.length
+  return added + removed
+}
+
+async function refreshAll() {
+  if (!graph.value.entities.length) return
+  let total = 0
+  for (const e of graph.value.entities) total += await refreshEntity(e)
+  ElMessage.success(total ? `已刷新，结构变更 ${total} 处` : '结构无变化')
+}
+function onLayout(id: string, x: number, y: number) {
   const e = graph.value.entities.find((en) => en.id === id)
   if (e) e.layout = { x, y }
 }
@@ -254,6 +406,7 @@ function deleteEntity() {
   graph.value.entities = graph.value.entities.filter((e) => e.id !== id)
   graph.value.relations = graph.value.relations.filter((r) => r.from_entity !== id && r.to_entity !== id)
   selEntityId.value = null
+  syncSqlResolvers()
 }
 
 // ── 关系 ──
@@ -376,6 +529,7 @@ function onImported(frag: ImportFragment) {
   for (const e of frag.entities) if (!existing.has(e.id)) graph.value.entities.push(e as any)
   const relIds = new Set(graph.value.relations.map((r) => r.id))
   for (const r of frag.relations) if (!relIds.has(r.id)) graph.value.relations.push(r as any)
+  syncSqlResolvers()
   ElMessage.success(`导入 ${frag.entities.length} 个实体、${frag.relations.length} 个关系`)
 }
 
@@ -485,12 +639,39 @@ function slug(s: string) {
 .fld label { display: block; font-size: 12px; color: var(--beone-text-secondary); margin-bottom: 5px; }
 .mono :deep(.el-input__inner) { font-family: 'Cascadia Code', Consolas, monospace; }
 .attr-list { margin: 12px 0; }
-.al-h { font-size: 12px; color: var(--beone-text-secondary); margin-bottom: 8px; }
+.al-h { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--beone-text-secondary); margin-bottom: 8px; }
+
+.rsrc { margin-bottom: 14px; padding: 10px 12px; background: #f6f9fc; border: 1px solid #e4ebf3; border-radius: 10px; }
+.rsrc-h { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 700; color: #55697f; margin-bottom: 8px; }
+.rsrc-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.rsrc-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #2f455e; background: #fff;
+  border: 1px solid #d7e2ee; border-radius: 999px; padding: 3px 10px;
+}
+.rsrc-chip .rc-dot { width: 7px; height: 7px; border-radius: 50%; background: #5b7fa6; }
+.rsrc-chip.agent .rc-dot { background: #7a5cd0; }
+.rsrc-chip.action .rc-dot { background: #d0782f; }
+.rc-type { font-size: 10px; color: #93a2b4; }
+.rc-x { border: 0; background: none; cursor: pointer; color: #b0bccb; font-size: 11px; padding: 0; }
+.rc-x:hover { color: #c24646; }
+.rsrc-empty { font-size: 11px; color: #93a2b4; line-height: 1.5; }
 .al-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid #f0f3f6; }
+.al-row.off { opacity: 0.45; }
 .al-caret { width: 12px; flex: 0 0 auto; font-size: 10px; color: #90a1b3; text-align: center; }
 .al-name { flex: 1; font-size: 13px; color: var(--beone-text-regular); }
 .al-name.clickable { cursor: pointer; }
 .al-name.clickable:hover { color: var(--beone-cerulean-blue); }
+.al-dtype { font-size: 10px; color: #93a2b4; font-family: 'Cascadia Code', Consolas, monospace; }
+.al-role { font-size: 10px; border-radius: 4px; padding: 1px 7px; font-weight: 600; flex: 0 0 auto; }
+.al-role.dimension { background: #eef1f5; color: #5b6b7f; }
+.al-role.measure { background: #e7f4f1; color: #0f766e; }
+.sh-actions { display: inline-flex; align-items: center; gap: 6px; }
+.sh-refresh {
+  border: 1px solid #d3dfec; background: #fff; cursor: pointer; color: #5f748a;
+  width: 22px; height: 22px; border-radius: 6px; font-size: 13px; line-height: 1;
+}
+.sh-refresh:hover { background: #f1f6fb; color: #33475b; }
 .al-edit {
   padding: 10px 10px 4px; margin: 2px 0 8px;
   background: #f7fafd; border: 1px solid #e6edf5; border-radius: 8px;

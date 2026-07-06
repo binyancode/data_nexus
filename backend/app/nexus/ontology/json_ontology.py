@@ -50,11 +50,15 @@ class JsonOntology(OntologyStore):
                                    kind="table", expr=e["table"]))
             for a in e.get("attributes", []):
                 aid = a.get("id")
-                if not aid:
-                    continue
+                if not aid or a.get("enabled") is False:
+                    continue   # 停用的属性不进概念（编译器/优化器看不到）
                 attrs = {"entity": eid}
                 if a.get("role"):
                     attrs["role"] = a["role"]
+                if a.get("dtype"):
+                    attrs["dtype"] = a["dtype"]
+                if a.get("additivity"):
+                    attrs["additivity"] = a["additivity"]
                 self._add(Concept(
                     id=aid, kind=ConceptKind.attribute, name=a.get("name") or aid,
                     semantics=a.get("semantics"), synonyms=_syn(a.get("synonyms")), attrs=attrs,

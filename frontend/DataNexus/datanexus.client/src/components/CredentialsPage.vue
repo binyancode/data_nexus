@@ -26,6 +26,7 @@
     </el-table>
 
     <el-dialog v-model="dlg" :title="editing ? '编辑凭据' : '新增凭据'" width="520px" @closed="reset">
+      <div v-loading="detailLoading">
       <div class="fld">
         <label>名称</label>
         <el-input v-model="form.credential_name" :disabled="editing" placeholder="唯一标识，如 dwh-sql" />
@@ -59,6 +60,7 @@
           <div v-if="f.description" class="hint">{{ f.description }}</div>
         </div>
       </template>
+      </div>
 
       <template #footer>
         <el-button @click="dlg = false">取消</el-button>
@@ -88,6 +90,7 @@ const types = ref<Record<string, CredentialTypeMeta>>({})
 const dlg = ref(false)
 const editing = ref(false)
 const saving = ref(false)
+const detailLoading = ref(false)
 const form = reactive<{ credential_name: string; credential_type: string; description: string; data: Record<string, any> }>({
   credential_name: '', credential_type: '', description: '', data: {},
 })
@@ -117,6 +120,7 @@ const canSubmit = computed(() => {
 })
 
 onMounted(async () => {
+  loading.value = true
   try { types.value = await getCredentialTypes() } catch (e: any) { ElMessage.error('加载类型失败：' + (e?.message || e)) }
   await load()
 })
@@ -151,6 +155,7 @@ async function openEdit(row: CredentialListItem) {
   form.credential_type = row.credential_type
   form.description = row.description || ''
   dlg.value = true
+  detailLoading.value = true
   try {
     const detail = await getCredentialDetail(row.credential_name)   // 仅非敏感字段
     form.data = { ...detail.data }
@@ -160,6 +165,8 @@ async function openEdit(row: CredentialListItem) {
     }
   } catch (e: any) {
     ElMessage.error('加载详情失败：' + (e?.message || e))
+  } finally {
+    detailLoading.value = false
   }
 }
 

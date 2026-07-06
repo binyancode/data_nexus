@@ -14,6 +14,8 @@ from nexus.resolvers.base import Resolver
 
 class ActionResolver(Resolver):
     resolver_type = "action"
+    provides_concepts = False
+    operators = {"ACT"}
 
     def fetch(self, call: dict, ctx: Optional[ExecContext] = None) -> NodeResult:
         node_id = call.get("node_id", "")

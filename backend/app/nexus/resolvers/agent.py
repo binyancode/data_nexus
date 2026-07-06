@@ -18,6 +18,8 @@ _DEFAULT_SYSTEM = (
 
 class AgentResolver(Resolver):
     resolver_type = "agent"
+    provides_concepts = False
+    operators = {"ASK"}
 
     def __init__(self, name: str, config: dict = None):
         super().__init__(name, config)

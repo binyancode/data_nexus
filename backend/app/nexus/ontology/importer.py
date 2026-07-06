@@ -17,13 +17,13 @@ def _local(table: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", name)
 
 
-# 常见度量列（无 role，作指标输入）；其余默认作维度可过滤
-_MEASURE_HINT = re.compile(r"(amount|amt|cost|qty|quantity|price|revenue|sales|total|sum|count|num)", re.I)
-
-
 def build_fragment(resolver_name: str, describe: dict, primary_keys: dict,
                    foreign_keys: list, tables: list[str]) -> dict:
-    """产出 {entities, relations}（metrics/derivations/actions 由用户后加）。"""
+    """产出 {entities, relations}（metrics/derivations/actions 由用户后加）。
+
+    角色按粗类型定：数值(number) → 度量(measure，默认 additive)；其它 → 维度(dimension)。
+    主键当维度（可等值过滤、不可聚合）。
+    """
     selected = set(tables)
     entities = []
     ent_by_table: dict[str, str] = {}
@@ -36,12 +36,20 @@ def build_fragment(resolver_name: str, describe: dict, primary_keys: dict,
         attributes = []
         for c in cols:
             col = c["column"]
+            dtype = c.get("dtype") or "unknown"
             aid = f"attribute.{_local(table)}.{col}"
             is_pk = col in pk
-            role = None if (is_pk or _MEASURE_HINT.search(col)) else col
+            if is_pk:
+                role = "dimension"          # 主键：可等值过滤，不聚合；显示仍是 PK
+            elif dtype == "number":
+                role = "measure"
+            else:
+                role = "dimension"
             attributes.append({
                 "id": aid, "name": col, "column": col,
-                "role": role, "synonyms": [], "semantics": None,
+                "role": role, "dtype": dtype,
+                "additivity": ("additive" if role == "measure" else None),
+                "synonyms": [], "semantics": None,
             })
         entities.append({
             "id": eid, "name": _local(table), "semantics": None, "synonyms": [],

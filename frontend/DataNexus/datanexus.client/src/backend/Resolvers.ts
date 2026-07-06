@@ -7,11 +7,14 @@ import type { EntityNodeData, RelationEdge } from '../bff/Ontology.js'
 export interface ResolverInfo {
   name: string
   type: string
+  provides_concepts?: boolean
+  operators?: string[]
 }
 
 export interface ColumnInfo {
   column: string
   type: string
+  dtype?: string
 }
 
 export interface SchemaInfo {

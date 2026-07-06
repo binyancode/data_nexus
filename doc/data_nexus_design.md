@@ -2,7 +2,7 @@
 
 > 一张图 · 一个协议 · 一种查询 —— 联结一切数据、智能体与行动
 >
-> 本文档是 Data Nexus 的**唯一设计文档**，覆盖三部分：**第一部分平台/概念设计**（第 0–15 节）、**第二部分后端工程实现**（第 16–29 节）、**第三部分前端设计**（第 30 节）。领域模型只在第一部分定义一次，后端/前端一律引用，避免多处漂移。
+> 本文档是 Data Nexus 的**唯一设计文档**，覆盖四部分：**第一部分平台/概念设计**（第 0–15 节）、**第二部分后端工程实现**（第 16–29 节）、**第三部分前端设计**（第 30 节）、**第四部分 as-built 实现细化**（第 31–36 节，落地事实，冲突以其为准）。领域模型只在第一部分定义一次，后端/前端一律引用，避免多处漂移。
 >
 > 配套 `doc/nexus_platform_ppt.html`（19 页设计稿）必须与本文一致。
 
@@ -30,6 +30,8 @@
 **第二部分 · 后端工程实现**：16 目标与形态 · 17 技术选型 · 18 总体架构 · 19 本体存储(Azure SQL) · 20 API · 21 SDK · 22 配置与容器 · 23 LLM · 24 可观测性 · 25 错误处理 · 26 测试 · 27 目录结构 · 28 开发阶段 P0–P4 · 29 风险
 
 **第三部分 · 前端设计**：30 前端设计（待补）
+
+**第四部分 · as-built 实现细化（2026-07）**：31 本体数据模型（role/dtype/additivity、graph JSON、刷新）· 32 AGGREGATE 增强（临时聚合/filter op/TopN/HAVING/可加性）· 33 Resolver 能力与本体作用域 · 34 规划 LLM 按 run 选择 · 35 凭据/LLM/源 管理 · 36 运行入口与工程细节
 
 ---
 
@@ -153,11 +155,22 @@ Data Nexus 的知识层是一张**语义图（ER / 知识图谱）**，运行层
 ### 3.3 attribute（属性，绑列，必属于一个 entity）
 
 ```jsonc
-{ "id": "attr.sales.quantity", "kind": "attribute", "name": "数量",
-  "entity": "entity.sales",   // ★ 必填：属于哪个 entity
-  "type": "int" }
-// 物理落在它的 Binding：attr.sales.quantity → fact_sales.quantity（列）
+{ "id": "attribute.sales.quantity", "kind": "attribute", "name": "数量",
+  "entity": "entity.sales",        // ★ 必填：属于哪个 entity
+  "column": "quantity",            // 物理列名
+  "role": "measure",               // ★ dimension（维度）| measure（度量）
+  "dtype": "number",               // ★ 粗粒度语义类型：number|text|date|bool|unknown
+  "additivity": "additive",        // ★ 仅 measure：additive|semi_additive|non_additive
+  "synonyms": [], "semantics": null }
+// 物理落在它的 Binding：attribute.sales.quantity → fact_sales.quantity（列）
 ```
+
+**属性四要素（as-built）**，详见 §31：
+- `role`：`dimension`（可过滤 / 可 group_by）或 `measure`（可计算 / 可过滤）。
+- `dtype`：粗粒度语义类型（`number/text/date/bool/unknown`），由各源在 `describe()` 里把原生 DB 类型映射进来（concept 是语义层，不绑死某库类型表）。
+- `additivity`（仅度量）：可加性——`additive`（任意维度可 SUM）/ `semi_additive`（跨时间不可 SUM，如库存/余额）/ `non_additive`（比率/百分比/单价，禁 SUM）。
+- 导入默认：数值列 → 度量（默认 `additive`）；主键与其它 → 维度。可在编辑器逐字段用下拉改。
+
 
 ### 3.4 metric（指标，表达式用 concept_id，纯语义）
 
@@ -1096,3 +1109,164 @@ backend/app/
 - **核心界面**：对话提问框 → 流式答案（SSE）→ 血缘/来源展开 → 动作回执卡片。
 - **本体管理台**：Concept / Binding 的浏览与人工确认（对接 P4 自动建本体）。
 - 详细设计待与后端 API（第 20 节）联调时补齐。
+
+---
+---
+
+# 第四部分 · as-built 实现细化（2026-07）
+
+> 本部分记录当前**已实现**的与前文设计有差异或扩展的细节。前文（第 1–30 节）是设计愿景，本部分是**落地事实**，冲突以本部分为准。
+
+## 31. 本体数据模型（as-built）
+
+### 31.1 存储形态：单块 graph JSON
+
+实现上，一份本体整体存为**一行**（`nexus.ontology`），`graph` 列是一整块 JSON，而非 §19 草案的 `nexus_concepts`/`nexus_bindings` 分表。graph 结构：
+
+```jsonc
+{
+  "entities":    [ { id, name, semantics, synonyms, resolver, table, key, attributes:[...], layout } ],
+  "relations":   [ { id, name, from_entity, from_key, to_entity, to_key, synonyms, semantics } ],
+  "metrics":     [ { id, name, synonyms, semantics, expr } ],
+  "derivations": [ { id, name, synonyms, semantics, prompt, inputs, resolver } ],
+  "actions":     [ { id, name, synonyms, semantics, action, desc, resolver } ],
+  "resolvers":   [ { name, type } ]     // ★ 本体挂载的能力源，见 §33
+}
+```
+
+- `nexus.ontology` 关键列：`ontology_id, name, description, owner, visibility(private|shared|public), state, graph(JSON)`。
+- Binding 不单独存表：entity 的 `resolver`+`table`、attribute 的 `column` 就是绑定；加载时 `json_ontology.py` 摊平成 `Concept` + `Binding`。
+
+### 31.2 属性四要素（role / dtype / additivity）
+
+每个 attribute 带四个语义要素（见 §3.3）：
+
+| 字段 | 取值 | 含义 |
+|---|---|---|
+| `role` | `dimension` / `measure` | 维度=可过滤+可分组；度量=可计算+可过滤 |
+| `dtype` | `number` `text` `date` `bool` `unknown` | 粗粒度语义类型 |
+| `additivity`（仅度量） | `additive` / `semi_additive` / `non_additive` | 可加性（计算指导） |
+| `column` | 列名 | 物理绑定 |
+
+**能力矩阵**：
+
+| role | WHERE 过滤 | group_by | 聚合 | HAVING |
+|---|---|---|---|---|
+| dimension | ✓（等值/比较） | ✓ | ✗ | ✗ |
+| measure | ✓（比较为主） | ✗ | ✓（按 additivity） | ✓（对聚合值） |
+
+### 31.3 粗粒度类型体系
+
+- concept 是语义层，不绑死数据库原生类型。定义 5 个粗类型：`number/text/date/bool/unknown`。
+- 各源在 `describe()` 里把原生类型映射进来（DB-specific 映射放 resolver 内）。SQL Server 映射：int/decimal/float/money…→number；char/varchar/nvarchar/text…→text；date/datetime/time…→date；bit→bool；其它→unknown。
+- 导入时按 dtype 定默认 role：主键或非数值→`dimension`；数值→`measure`（默认 `additivity=additive`）。**已移除**旧的按列名关键词猜度量的 `_MEASURE_HINT`。
+
+### 31.4 表结构刷新（refresh）
+
+本体编辑器支持从数据库重新探测同步表结构：
+- **每个实体一个刷新按钮** + **编辑器顶部全局刷新**。
+- 合并规则：只更新**结构属性**（`column`/`dtype`）；**保留用户定义**（`role`/`additivity`/`name`/`synonyms`/`semantics`）。新列按 dtype 取默认角色加入；删除的列移除；metrics/relations/resolvers 不动。
+
+## 32. AGGREGATE 增强（as-built）
+
+实现的 AGGREGATE 节点 `params` 远超 §6.2 草案，支持：
+
+```jsonc
+{
+  "operator": "AGGREGATE",
+  "concept": "metric.gross_margin | null",   // 有预定义指标就填；没有则 null
+  "params": {
+    "measure": "attribute.fact_order.quantity", // 临时聚合：无指标时用某度量列
+    "agg": "SUM",                               // SUM|AVG|MIN|MAX|COUNT
+    "filters": [ { "concept": "<attr id>", "op": ">", "value": 1000 } ],
+    "group_by": "attribute.dim_product.product_name", // 仅维度
+    "order": "desc", "limit": 3,                // TopN
+    "having": { "op": ">", "value": 1000 }      // 聚合后过滤
+  }
+}
+```
+
+### 32.1 指标可选 → 临时聚合（ad-hoc aggregation）
+
+- AGGREGATE 取数二选一：① `concept` 填**预定义指标**（走口径表达式，首选，可治理）；② 无合适指标时 `concept=null` + `params.{measure, agg}`（对某**度量**列临时聚合）。
+- 意义：引入实体后**不必逐个定义 metric**，"总 amount" 自动 `SUM(amount)`。指标像"派生"一样降级为**可选治理层**。
+- 校验：`SUM/AVG` 仅限 `dtype==number`；`non_additive` 度量禁 `SUM`；`measure` 必须是 role=measure 的属性。
+
+### 32.2 过滤操作符（filter op）
+
+- filter 元素扩为 `{concept, op, value}`，`op ∈ = != > >= < <= like in`（白名单防注入，默认 `=`）。`in` 的 value 为数组。
+- **维度和度量都可过滤**：维度常用等值，度量常用比较（`amount > 1000`）。
+- 过滤属性可跨实体，引擎据 relation 自动 JOIN。
+
+### 32.3 分组 / TopN / HAVING
+
+- `group_by`（仅维度）+ `order(desc/asc)` + `limit` → 排名/TopN，SQL 用 `TOP (n) … GROUP BY … ORDER BY value`。
+- `having:{op,value}` → 聚合后过滤（`HAVING <agg表达式> <op> ?`），典型如"总销量超 1000 的产品"。
+- 分组结果为多行 `label + value`，生成器渲染成列表。
+
+### 32.4 可加性约束（additivity）
+
+编译器把每个度量的可加性告诉 LLM，约束聚合：
+- `additive`：任意维度可 SUM/AVG/MIN/MAX。
+- `semi_additive`：跨时间维度别 SUM（用 AVG 或不按时间分组）——库存、余额、在职人数。
+- `non_additive`：禁 SUM，用 AVG 或直接取——比率、百分比、单价。
+
+## 33. Resolver 能力与本体作用域（as-built）
+
+### 33.1 能力声明（算子能力驱动，非类型名）
+
+`Resolver` 基类加两个**类级**能力声明，编译器/优化器只看能力、不看类型名：
+
+| 属性 | sql | agent | action |
+|---|---|---|---|
+| `provides_concepts`（能否贡献概念/可导入实体） | True | False | False |
+| `operators`（能执行哪些 SQG 算子） | `{SELECT,FILTER,AGGREGATE,JOIN}` | `{ASK}` | `{ACT}` |
+
+- Python `GET /resolvers` 返回 `{name, type, provides_concepts, operators}`，前端据此分流：`provides_concepts=true` → 导入实体向导；`false` → 挂载能力源选择器。
+
+### 33.2 本体作用域：resolver 挂载
+
+- 本体 `graph.resolvers = [{name,type}]` 声明它挂载了哪些能力源。
+- **有 concept 的（SQL）**：导入实体时自动挂；画布上再无任一概念引用它时自动摘除。
+- **无 concept 的（agent/action）**：编辑器"挂载能力源"手动增删，作为独立能力挂在本体上。
+- **回答问题只用本体挂载的 resolver**：`NexusClient.ask` 从 `graph.resolvers`（老本体从实体绑定推导兼容）算出**允许集**，传给优化器；优化器的算子派发（原全局 `_first_of_type`）改为**在允许集内按算子能力找**（`_first_with_operator`），AGGREGATE 也校验源 ∈ 允许集。
+
+### 33.3 编译器按可用算子裁剪
+
+- 本体**可用算子集** = 所挂 resolver 的 `operators` 并集。
+- 编译器提示词据此裁剪：挂了 agent 才提供 ASK、挂了 action 才提供 ACT；无对应能力则不生成对应节点，最终自然只输出取数结果（不在答案里解释，避免硬编码）。
+- 派生(derivation)/动作(action) 概念降级为**可选具名模板**：挂了 agent 即可 ASK，ASK 的 `concept` 可为 null（自由 prompt）；有具名派生则可引用。
+
+### 33.4 本体预检查（validator）
+
+使用本体前先 `validate_ontology(onto, registry)`，不通过则 `/ask` 直接报错（不建 run、不起线程），原因回前端：
+- 规则 1：本体未挂任何 resolver → 拒绝。
+- 规则 2：本体引用的 resolver 不存在/未启用 → 报错。
+- 规则可持续扩展。
+
+## 34. 规划 LLM 按 run 选择（as-built）
+
+`nexus.llms` 是**规划大脑**目录（编译器 + 本体路由用），与执行用的 resolver 解耦：
+- 提问界面加"模型"下拉；`POST /ask` 带 `llm_name`；`start_ask` 把选中 LLM 贯穿到编译器/路由器（`registry.llm(llm_name)`）；未选走 `is_default` 兜底。
+- ASK 执行体（agent resolver）用自己的 azure_openai 凭据，**与 llms 表无关**。
+
+## 35. 凭据 / LLM / 源 管理（as-built）
+
+三个管理面板 + 注册表热重载：
+
+| 面板 | 数据面 | 说明 |
+|---|---|---|
+| **凭据** | 列表走 BFF 读 `nexus.app_credential`（非敏感元数据）；详情/增删改走 **Python**（持有 Key Vault） | 敏感字段存 KV；更新必须重填敏感字段（不合并）；详情只回非敏感值 |
+| **LLM** | BFF 直连 `nexus.llms`（无密文） | CRUD + `is_default`（唯一默认）；引用 azure_openai 凭据 |
+| **源** | BFF 直连 `nexus.resolvers`（无密文） | CRUD；按类型选兼容凭据（sql↔sql、agent↔azure_openai、action↔无） |
+
+- **热重载**：`POST /api/v1/resolvers/reload` → `registry.reload()`（清空重装配），源/凭据/LLM 保存后即时生效，免重启。
+- 凭据类型自描述：`credential.get_types()` 返回字段 schema（含 `required/sensitive`），前端据此动态渲染表单。
+
+## 36. 运行入口与其它工程细节（as-built）
+
+- **`start_ask` 同步建 run**：`/ask` 先同步 `start_run` 落库再返回 run_id，然后后台线程执行四段引擎；消除前端拿到 run_id 立即轮询 `runs/{id}` 时的"Run not found"时间窗。
+- **路由配置驱动**：`api/v1/router.py` 从 `config.route_prefixes` 动态挂载端点（`ask/resolvers/credentials/me`）。
+- **生成器多行渲染**：AGGREGATE 分组结果（`label+value` 多行）渲染成列表并入血缘。
+- **迁移脚本**：`app/migrate_attr_types.py` 一次性把存量本体属性迁到新枚举（role→dimension/measure，补 dtype/additivity），保留用户名称/同义词/指标/挂载源。
+

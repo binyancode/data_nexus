@@ -15,6 +15,7 @@ from nexus.core.models import Answer, ExecContext
 from nexus.ontology.repository import OntologyRepository
 from nexus.ontology.json_ontology import JsonOntology
 from nexus.ontology.router import OntologyRouter
+from nexus.ontology.validator import validate_ontology, ontology_resolver_names
 from nexus.registry import ResolverRegistry
 from nexus.engine.compiler import Compiler
 from nexus.engine.optimizer import Optimizer
@@ -56,6 +57,9 @@ class NexusClient:
                   llm_name: Optional[str] = None) -> str:
         """同步建 run 并返回 run_id，随后在后台线程执行四段引擎。
 
+        使用本体前先做**预检查**（validate_ontology）：本体不可用（如未配置任何 resolver）
+        则直接抛 ValueError，由接口层报错给前端，不创建 run、不起线程。
+
         关键：start_run 在返回前完成落库，避免前端拿到 run_id 立即轮询 runs/{id} 时出现
         「Run not found」的时间窗。llm_name 为本次运行选中的规划 LLM（None=用默认）。
         """
@@ -63,7 +67,15 @@ class NexusClient:
         ctx.llm_name = llm_name
         llm = self.registry.llm(llm_name)
         onto = self._select_ontology(question, as_user, ontology_id, llm=llm)
-        ctx.ontology_id = onto.ontology_id if onto else None
+
+        # ── 预检查：本体不可用则直接拒绝 ──
+        if onto is None:
+            raise ValueError("找不到可用（或有权访问）的本体。")
+        problems = validate_ontology(onto, self.registry)
+        if problems:
+            raise ValueError("；".join(problems))
+
+        ctx.ontology_id = onto.ontology_id
 
         ctx.recorder = get_run_recorder()
         ctx.recorder.start_run(ctx.run_id, question, as_user, ctx.ontology_id)
@@ -82,8 +94,15 @@ class NexusClient:
 
         # 按选中的本体临时装配 compiler/optimizer（引擎无状态、构造廉价）
         scoped = JsonOntology(onto.graph)
-        compiler = Compiler(scoped, self.registry.llm(ctx.llm_name))
-        optimizer = Optimizer(scoped, self.registry)
+        # 本体作用域：允许使用的 resolver 名集合 + 可用算子集（所挂 resolver 的能力并集）
+        allowed = ontology_resolver_names(onto.graph)
+        available_ops: set[str] = set()
+        for n in allowed:
+            r = self.registry.resolver(n)
+            if r:
+                available_ops |= set(getattr(r, "operators", set()))
+        compiler = Compiler(scoped, self.registry.llm(ctx.llm_name), available_ops)
+        optimizer = Optimizer(scoped, self.registry, allowed)
 
         run_state, answer = "done", None
         try:
@@ -172,7 +191,10 @@ class NexusClient:
 
     # ── 数据源探测 / 导入 ──
     def list_resolvers(self) -> list:
-        return [{"name": r.name, "type": r.resolver_type} for r in self.registry.all_resolvers()]
+        return [{"name": r.name, "type": r.resolver_type,
+                 "provides_concepts": r.provides_concepts,
+                 "operators": sorted(r.operators)}
+                for r in self.registry.all_resolvers()]
 
     def list_llms(self) -> list:
         """规划用 LLM 目录（name + is_default），供提问界面下拉。"""

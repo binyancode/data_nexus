@@ -16,7 +16,10 @@ export interface AttributeNode {
   id: string
   name: string
   column?: string | null
-  role?: string | null
+  role?: 'dimension' | 'measure' | null
+  dtype?: 'number' | 'text' | 'date' | 'bool' | 'unknown' | null
+  additivity?: 'additive' | 'semi_additive' | 'non_additive' | null
+  enabled?: boolean          // 是否启用（停用则不进编译器/查询；默认启用）
   synonyms?: string[]
   semantics?: string | null
 }
@@ -73,12 +76,18 @@ export interface ActionItem {
   endpoint?: string
 }
 
+export interface AttachedResolver {
+  name: string
+  type: string
+}
+
 export interface OntologyGraph {
   entities: EntityNodeData[]
   relations: RelationEdge[]
   metrics: MetricItem[]
   derivations: DerivationItem[]
   actions: ActionItem[]
+  resolvers?: AttachedResolver[]   // 本体挂载的 resolver（SQL 随实体自动、agent/action 手动）
 }
 
 export interface OntologyMeta {
@@ -98,7 +107,7 @@ export interface OntologyFull extends OntologyMeta {
 }
 
 export function emptyGraph(): OntologyGraph {
-  return { entities: [], relations: [], metrics: [], derivations: [], actions: [] }
+  return { entities: [], relations: [], metrics: [], derivations: [], actions: [], resolvers: [] }
 }
 
 export function listOntologies(): Promise<OntologyMeta[]> {

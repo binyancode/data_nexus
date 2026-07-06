@@ -18,11 +18,23 @@ from nexus.ontology.store import OntologyStore
 # 表达式里引用属性概念的记号，如 attribute.sales.amount
 _ATTR_TOKEN = re.compile(r"attribute(?:\.[A-Za-z0-9_]+)+")
 
+# 过滤操作符白名单（防注入）；键=LLM 给的 op，值=拼进 SQL 的算子
+_FILTER_OPS = {"=": "=", "!=": "<>", "<>": "<>", ">": ">", ">=": ">=",
+               "<": "<", "<=": "<=", "like": "LIKE", "in": "IN"}
+# 临时聚合允许的函数；以及各函数对 dtype 的要求
+_AGG_FUNCS = {"SUM", "AVG", "MIN", "MAX", "COUNT"}
+_AGG_NEEDS_NUMBER = {"SUM", "AVG"}
+
 
 class Optimizer:
-    def __init__(self, ontology: OntologyStore, registry=None):
+    def __init__(self, ontology: OntologyStore, registry=None, allowed: Optional[set] = None):
         self.ontology = ontology
         self.registry = registry
+        # 本次运行允许使用的 resolver 名集合（本体作用域）；None = 不限制（兼容/测试）
+        self.allowed = set(allowed) if allowed is not None else None
+
+    def _allowed(self, name: Optional[str]) -> bool:
+        return bool(name) and (self.allowed is None or name in self.allowed)
 
     def plan(self, sqg: SQG, ctx: Optional[ExecContext] = None) -> QueryPlan:
         nodes: list[PlanNode] = []
@@ -56,10 +68,7 @@ class Optimizer:
 
     # ── AGGREGATE → 下推 SQL ──
     def _plan_aggregate(self, node) -> Optional[PlanNode]:
-        metric = self.ontology.get_concept(node.concept) if node.concept else None
-        if not metric:
-            return None
-        expr = metric.attrs.get("expr")
+        expr = self._aggregate_expr(node)
         if not expr:
             return None
 
@@ -72,21 +81,55 @@ class Optimizer:
             limit = int(limit) if limit is not None else None
         except (TypeError, ValueError):
             limit = None
-        rank = {"group_by": group_by, "order": order, "limit": limit} if group_by else None
+        having = self._clean_having(node.params.get("having"))
+        rank = {"group_by": group_by, "order": order, "limit": limit, "having": having} \
+            if (group_by or having) else None
 
-        # 新式：表达式用属性(attribute.*)表达，实体与 JOIN 由属性自动推导
         resolved = self._resolve_attr_aggregate(expr, filters, rank)
-        if resolved is None:
-            # 兼容旧式：metric.attrs.entity + 裸列表达式
-            resolved = self._resolve_entity_aggregate(metric, expr, filters, rank)
         if resolved is None:
             return None
         sql, params, resolver = resolved
+        if not self._allowed(resolver):
+            return None
         return PlanNode(
             id=node.id, operator=node.operator, name=node.name, resolver=resolver,
             call={"node_id": node.id, "sql": sql, "params": params},
             depends_on=list(node.depends_on),
         )
+
+    # 取聚合表达式：优先 metric 口径；否则用 measure 属性 + agg 函数（临时聚合）
+    def _aggregate_expr(self, node) -> Optional[str]:
+        metric = self.ontology.get_concept(node.concept) if node.concept else None
+        if metric and metric.attrs.get("expr"):
+            return metric.attrs["expr"]
+        # 临时聚合：{measure: attribute.*, agg: SUM/AVG/MIN/MAX/COUNT}
+        measure = node.params.get("measure")
+        if not measure:
+            return None
+        mc = self.ontology.get_concept(measure)
+        if not mc or mc.attrs.get("role") != "measure":
+            return None
+        agg = (node.params.get("agg") or "SUM").upper()
+        if agg not in _AGG_FUNCS:
+            return None
+        dtype = mc.attrs.get("dtype")
+        if agg in _AGG_NEEDS_NUMBER and dtype not in (None, "number"):
+            return None
+        additivity = mc.attrs.get("additivity")
+        if additivity == "non_additive" and agg == "SUM":
+            return None   # 比率/百分比等不可加：禁 SUM
+        return f"{agg}({measure})"
+
+    def _clean_having(self, having):
+        """having: {op, value} → 规整；非法/缺失返回 None。"""
+        if not isinstance(having, dict):
+            return None
+        op = _FILTER_OPS.get((having.get("op") or "").lower())
+        if op is None or op == "IN" or op == "LIKE":   # HAVING 只支持比较
+            op = ">" if op is None else op
+        if having.get("value") in (None, ""):
+            return None
+        return {"op": op, "value": having.get("value")}
 
     # 属性表达式 → SQL（多实体自动 JOIN）
     def _resolve_attr_aggregate(self, expr: str, filters: list, rank: Optional[dict] = None):
@@ -115,6 +158,13 @@ class Optimizer:
                 return None
             if group_ent not in ent_order:
                 ent_order.append(group_ent)
+
+        # 过滤属性可能引入新实体（度量/维度过滤，跨实体自动 JOIN）
+        for f in (filters or []):
+            fc = self.ontology.get_concept(f.get("concept")) if f.get("concept") else None
+            fent = fc.attrs.get("entity") if fc else None
+            if fent and fent not in ent_order and self._attr_column(f.get("concept")):
+                ent_order.append(fent)
 
         # 实体 → 表/resolver/别名
         meta: dict[str, dict] = {}
@@ -156,49 +206,34 @@ class Optimizer:
 
         where, params = self._build_where(filters, meta, single)
 
-        # 分组 / 排序 / TopN
-        if group_ent and group_col:
+        # 分组 / 排序 / TopN / HAVING
+        rank = rank or {}
+        group_ok = bool(group_ent and group_col)
+        if group_ok:
             label_ref = col_ref(group_ent, group_col)
             top = f"TOP ({int(rank['limit'])}) " if rank.get("limit") else ""
             sql = f"SELECT {top}{label_ref} AS label, {resolved_expr} AS value FROM {from_sql}"
             if where:
                 sql += " WHERE " + " AND ".join(where)
-            sql += f" GROUP BY {label_ref} ORDER BY value {rank['order']}"
+            sql += f" GROUP BY {label_ref}"
+            if rank.get("having"):
+                sql += f" HAVING {resolved_expr} {rank['having']['op']} ?"
+                params.append(rank['having']['value'])
+            sql += f" ORDER BY value {rank.get('order', 'DESC')}"
         else:
             sql = f"SELECT {resolved_expr} AS value FROM {from_sql}"
             if where:
                 sql += " WHERE " + " AND ".join(where)
+            # 无 group_by 的 HAVING：整体聚合值过滤
+            if rank.get("having"):
+                sql += f" HAVING {resolved_expr} {rank['having']['op']} ?"
+                params.append(rank['having']['value'])
         return sql, params, resolver
 
-    # 旧式：单实体 + 裸列表达式
-    def _resolve_entity_aggregate(self, metric, expr: str, filters: list, rank: Optional[dict] = None):
-        table, resolver = self._entity_binding(metric.attrs.get("entity"))
-        if not (table and resolver):
-            return None
-        where, params = [], []
-        for f in filters:
-            col = self._attr_column(f.get("concept"))
-            if col:
-                where.append(f"{col} = ?")
-                params.append(f.get("value"))
-
-        group_col = self._attr_column(rank["group_by"]) if rank and rank.get("group_by") else None
-        if group_col:
-            top = f"TOP ({int(rank['limit'])}) " if rank.get("limit") else ""
-            sql = f"SELECT {top}{group_col} AS label, {expr} AS value FROM {table}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            sql += f" GROUP BY {group_col} ORDER BY value {rank['order']}"
-        else:
-            sql = f"SELECT {expr} AS value FROM {table}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-        return sql, params, resolver
-
-    # 过滤条件 → WHERE（只应用属性在本次查询实体内的过滤；多实体时加别名前缀）
+    # 过滤条件 → WHERE（维度/度量均可过滤；op 白名单；多实体时加别名前缀）
     def _build_where(self, filters: list, meta: dict, single: bool):
         where, params = [], []
-        for f in filters:
+        for f in (filters or []):
             cid = f.get("concept")
             col = self._attr_column(cid)
             if not col:
@@ -210,8 +245,20 @@ class Optimizer:
                 continue
             if not single and ent in meta:
                 col = f'{meta[ent]["alias"]}.{col}'
-            where.append(f"{col} = ?")
-            params.append(f.get("value"))
+            op = _FILTER_OPS.get((f.get("op") or "=").lower(), "=")
+            value = f.get("value")
+            if op == "IN":
+                vals = value if isinstance(value, list) else [value]
+                vals = [v for v in vals if v not in (None, "")]
+                if not vals:
+                    continue
+                where.append(f"{col} IN ({','.join('?' * len(vals))})")
+                params.extend(vals)
+            else:
+                if value in (None, ""):
+                    continue
+                where.append(f"{col} {op} ?")
+                params.append(value)
         return where, params
 
     # 找一条把 ent 连到已 join 实体的关系
@@ -230,7 +277,9 @@ class Optimizer:
 
     # ── ASK → agent(LLM) ──
     def _plan_ask(self, node) -> Optional[PlanNode]:
-        resolver = self._concept_resolver(node.concept) or self._first_of_type("agent")
+        resolver = self._concept_resolver(node.concept)
+        if not self._allowed(resolver):
+            resolver = self._first_with_operator("ASK")
         if not resolver:
             return None
         prompt = node.params.get("prompt") or node.params.get("ask") or ""
@@ -245,7 +294,8 @@ class Optimizer:
     # ── ACT → action ──
     def _plan_act(self, node) -> Optional[PlanNode]:
         resolver, expr = self._concept_resolver_expr(node.concept)
-        resolver = resolver or self._first_of_type("action")
+        if not self._allowed(resolver):
+            resolver = self._first_with_operator("ACT")
         if not resolver:
             return None
         call = {
@@ -298,3 +348,14 @@ class Optimizer:
             return None
         rs = self.registry.resolvers_of_type(rtype)
         return rs[0].name if rs else None
+
+    def _first_with_operator(self, op: str) -> Optional[str]:
+        """在允许集内，找第一个能执行算子 op 的 resolver（按算子能力，不看类型名）。"""
+        if not self.registry:
+            return None
+        for r in self.registry.all_resolvers():
+            if not self._allowed(r.name):
+                continue
+            if op in getattr(r, "operators", set()):
+                return r.name
+        return None

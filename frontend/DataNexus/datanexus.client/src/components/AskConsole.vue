@@ -83,8 +83,15 @@
         <p class="init-sub">选择本体、装配引擎并创建运行，请稍候。</p>
       </section>
 
+      <!-- 预检查 / 提问失败（如本体不可用） -->
+      <section v-else-if="askError" class="err-state">
+        <el-icon class="err-icon"><WarningFilled /></el-icon>
+        <p class="err-title">无法使用该本体</p>
+        <p class="err-sub">{{ askError }}</p>
+      </section>
+
       <!-- 空状态 -->
-      <section v-if="!runId && !answerText && !loading" class="empty-state">
+      <section v-if="!runId && !answerText && !loading && !askError" class="empty-state">
         <el-icon class="empty-icon"><ChatLineRound /></el-icon>
         <p>提问后，这里会显示分析执行过程与答案。</p>
       </section>
@@ -94,7 +101,6 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
 import { ask } from '../backend/Ask.js'
 import { listOntologies, type OntologyMeta } from '../bff/Ontology.js'
 import { listLlms, type LlmItem } from '../bff/Llms.js'
@@ -113,6 +119,7 @@ const answerText = ref('')
 const lineage = ref<Cell[]>([])
 const runId = ref<string | null>(null)
 const lastQuestion = ref('')
+const askError = ref('')
 const ontologyId = ref('')
 const ontologies = ref<OntologyMeta[]>([])
 const llmName = ref('')
@@ -142,12 +149,13 @@ async function onAsk() {
   answerText.value = ''
   lineage.value = []
   runId.value = null
+  askError.value = ''
   lastQuestion.value = q
   try {
     const res = await ask(q, ontologyId.value || null, llmName.value || null)
     runId.value = res.run_id
   } catch (e: any) {
-    ElMessage.error('提问失败：' + (e?.message || e))
+    askError.value = e?.message || String(e)
   } finally {
     loading.value = false
   }
@@ -384,5 +392,17 @@ function onRuntimeDone(a: RuntimeAnswer) {
 @keyframes init-rotate { to { transform: rotate(360deg); } }
 .init-title { font-size: 15px; font-weight: 600; color: var(--beone-text-primary); margin: 0; }
 .init-sub { font-size: 13px; color: var(--beone-text-secondary); margin: 0; }
+
+.err-state {
+  margin-top: 60px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.err-icon { font-size: 40px; color: #e0736a; margin-bottom: 6px; }
+.err-title { font-size: 15px; font-weight: 600; color: #b23b32; margin: 0; }
+.err-sub { font-size: 13px; color: #8a6d6a; margin: 0; max-width: 520px; line-height: 1.6; }
 </style>
 

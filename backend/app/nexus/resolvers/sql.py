@@ -12,8 +12,26 @@ from nexus.core.models import NodeResult, ExecContext
 from nexus.resolvers.base import Resolver
 
 
+# 原生 DB 类型 → 粗粒度语义类型（concept 是语义层，不绑死某库的类型表）
+_COARSE_TYPE = {
+    "int": "number", "bigint": "number", "smallint": "number", "tinyint": "number",
+    "decimal": "number", "numeric": "number", "float": "number", "real": "number",
+    "money": "number", "smallmoney": "number", "bit": "bool",
+    "char": "text", "varchar": "text", "nchar": "text", "nvarchar": "text",
+    "text": "text", "ntext": "text",
+    "date": "date", "datetime": "date", "datetime2": "date", "smalldatetime": "date",
+    "datetimeoffset": "date", "time": "date",
+}
+
+
+def _coarse_type(raw: str) -> str:
+    return _COARSE_TYPE.get((raw or "").strip().lower(), "unknown")
+
+
 class SqlResolver(Resolver):
     resolver_type = "sql"
+    provides_concepts = True
+    operators = {"SELECT", "FILTER", "AGGREGATE", "JOIN"}
 
     def __init__(self, name: str, config: dict = None):
         super().__init__(name, config)
@@ -51,7 +69,7 @@ class SqlResolver(Resolver):
             )
 
     def describe(self) -> dict:
-        """探测：返回 {schema.table: [{column, type}]}。"""
+        """探测：返回 {schema.table: [{column, type, dtype}]}。dtype 为粗粒度语义类型。"""
         rows = self._db.execute_query(
             """SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
                FROM INFORMATION_SCHEMA.COLUMNS
@@ -60,7 +78,10 @@ class SqlResolver(Resolver):
         tables: dict[str, list] = {}
         for r in rows:
             key = f"{r['TABLE_SCHEMA']}.{r['TABLE_NAME']}"
-            tables.setdefault(key, []).append({"column": r["COLUMN_NAME"], "type": r["DATA_TYPE"]})
+            tables.setdefault(key, []).append({
+                "column": r["COLUMN_NAME"], "type": r["DATA_TYPE"],
+                "dtype": _coarse_type(r["DATA_TYPE"]),
+            })
         return tables
 
     def primary_keys(self) -> dict:
