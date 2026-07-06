@@ -17,12 +17,16 @@ class OntologyRouter:
     def __init__(self, llm=None):
         self.llm = llm
 
-    def pick(self, question: str, ontologies: list) -> Optional[str]:
-        """ontologies: list[Ontology]（含 ontology_id/name/description）。返回 ontology_id。"""
+    def pick(self, question: str, ontologies: list, llm=None) -> Optional[str]:
+        """ontologies: list[Ontology]（含 ontology_id/name/description）。返回 ontology_id。
+
+        llm: 本次运行选中的规划 LLM（None 时用构造时注入的默认）。
+        """
+        llm = llm or self.llm
         candidates = [o for o in ontologies]
         if not candidates:
             return None
-        if len(candidates) == 1 or self.llm is None:
+        if len(candidates) == 1 or llm is None:
             return candidates[0].ontology_id
 
         catalog = "\n".join(
@@ -34,7 +38,7 @@ class OntologyRouter:
             "只输出 JSON：{\"ontology_id\":\"<id>\"}。\n# 本体清单\n" + catalog
         )
         try:
-            out = self.llm.complete(
+            out = llm.complete(
                 [{"role": "system", "content": system}, {"role": "user", "content": question}],
                 schema={"type": "object"},
             )

@@ -59,6 +59,7 @@ const menuItems = [
   { id: 'ontology', label: '本体', icon: 'Share' },
   { id: 'resolvers', label: '源管理', icon: 'Coin' },
   { id: 'llms', label: 'LLM', icon: 'MagicStick' },
+  { id: 'credentials', label: '凭据', icon: 'Key' },
 ]
 
 function openHelp() {

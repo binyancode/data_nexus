@@ -26,6 +26,9 @@ import { loadAuthState } from '../common/authState.js'
 const PlaceholderPage = defineAsyncComponent(() => import('./PlaceholderPage.vue'))
 const RunsPage = defineAsyncComponent(() => import('./RunsPage.vue'))
 const OntologiesPage = defineAsyncComponent(() => import('./OntologiesPage.vue'))
+const CredentialsPage = defineAsyncComponent(() => import('./CredentialsPage.vue'))
+const LlmsPage = defineAsyncComponent(() => import('./LlmsPage.vue'))
+const ResolversPage = defineAsyncComponent(() => import('./ResolversPage.vue'))
 
 const activeMenu = ref('ask')
 
@@ -37,6 +40,9 @@ const componentMap: Record<string, Component> = {
   ask: AskConsole,
   runs: RunsPage,
   ontology: OntologiesPage,
+  credentials: CredentialsPage,
+  llms: LlmsPage,
+  resolvers: ResolversPage,
 }
 
 const activeComponent = computed(() => componentMap[activeMenu.value] ?? PlaceholderPage)

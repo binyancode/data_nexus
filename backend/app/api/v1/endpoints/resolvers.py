@@ -13,6 +13,12 @@ async def list_resolvers(nexus: NexusClient = Depends(get_nexus)):
     return nexus.list_resolvers()
 
 
+@router.post("/reload")
+async def reload_registry(nexus: NexusClient = Depends(get_nexus)):
+    """从 DB 重新装配 resolver / llm（源/凭据/LLM 管理保存后调用，免重启即时生效）。"""
+    return nexus.reload_registry()
+
+
 @router.get("/{name}/schema")
 async def resolver_schema(name: str, nexus: NexusClient = Depends(get_nexus)):
     """探测某个 sql resolver 的表与列：{tables: {schema.table: [{column,type}]}}。"""

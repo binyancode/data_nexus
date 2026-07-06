@@ -93,6 +93,13 @@ class ResolverRegistry:
             self._default_llm = next(iter(self._llms))
         return self
 
+    def reload(self) -> "ResolverRegistry":
+        """清空并从 DB 重新装配（供源/凭据/LLM 管理保存后即时生效，免重启）。"""
+        self._resolvers = {}
+        self._llms = {}
+        self._default_llm = None
+        return self.load()
+
     # ── 手动注册（可选）──
     def register_resolver(self, resolver: Resolver) -> None:
         self._resolvers[resolver.name] = resolver
@@ -114,6 +121,10 @@ class ResolverRegistry:
 
     def llm(self, name: Optional[str] = None) -> Optional[LLMProvider]:
         return self._llms.get(name or self._default_llm) if (name or self._default_llm) else None
+
+    def list_llms(self) -> list[dict]:
+        """规划用 LLM 目录（供提问界面下拉）：name + is_default，不含任何密文。"""
+        return [{"name": n, "is_default": n == self._default_llm} for n in self._llms]
 
     def capabilities(self) -> list[dict]:
         return [r.capabilities() for r in self._resolvers.values()]

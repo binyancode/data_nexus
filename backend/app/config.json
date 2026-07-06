@@ -50,6 +50,10 @@
                     "prefix": "/resolvers",
                     "tags": ["Resolvers"]
                 },
+                "credentials.router": {
+                    "prefix": "/credentials",
+                    "tags": ["Credentials"]
+                },
                 "me.router": {
                     "prefix": "/me",
                     "tags": ["Auth"]

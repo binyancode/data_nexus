@@ -175,6 +175,7 @@ class ExecContext:
         self.question = question
         self.as_user = as_user
         self.ontology_id = ontology_id
+        self.llm_name: Optional[str] = None       # 本次运行选中的规划 LLM（None=用默认）
         self.cancellation_token = cancellation_token
         self.started_at = time.time()
         self.results: dict[str, NodeResult] = {}   # node_id -> NodeResult

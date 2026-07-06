@@ -22,6 +22,12 @@
                 <el-option value="" label="自动（智能路由）" />
                 <el-option v-for="o in ontologies" :key="o.ontologyId" :value="o.ontologyId" :label="o.name" />
               </el-select>
+              <span class="ao-label">模型</span>
+              <el-select v-model="llmName" size="small" placeholder="默认" class="ao-sel">
+                <el-option value="" label="默认" />
+                <el-option v-for="l in llms" :key="l.llm_name" :value="l.llm_name"
+                           :label="l.is_default ? l.llm_name + '（默认）' : l.llm_name" />
+              </el-select>
             </div>
             <span class="ask-hint">Enter 提问 · Shift+Enter 换行</span>
             <el-button type="primary" :loading="loading" :disabled="!question.trim()" @click="onAsk">
@@ -84,6 +90,7 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ask } from '../backend/Ask.js'
 import { listOntologies, type OntologyMeta } from '../bff/Ontology.js'
+import { listLlms, type LlmItem } from '../bff/Llms.js'
 import NexusRuntime from './runtime/NexusRuntime.vue'
 import type { RuntimeAnswer } from './runtime/dag'
 
@@ -101,9 +108,12 @@ const runId = ref<string | null>(null)
 const lastQuestion = ref('')
 const ontologyId = ref('')
 const ontologies = ref<OntologyMeta[]>([])
+const llmName = ref('')
+const llms = ref<LlmItem[]>([])
 
 onMounted(async () => {
   try { ontologies.value = await listOntologies() } catch { /* ignore */ }
+  try { llms.value = await listLlms() } catch { /* ignore */ }
 })
 
 const examples = [
@@ -127,7 +137,7 @@ async function onAsk() {
   runId.value = null
   lastQuestion.value = q
   try {
-    const res = await ask(q, ontologyId.value || null)
+    const res = await ask(q, ontologyId.value || null, llmName.value || null)
     runId.value = res.run_id
   } catch (e: any) {
     ElMessage.error('提问失败：' + (e?.message || e))

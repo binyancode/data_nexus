@@ -41,25 +41,28 @@ class NexusClient:
         self.generator = Generator()
 
     # 选一份对 as_user 可见的本体（显式指定优先，否则 LLM 自动路由）
-    def _select_ontology(self, question: str, as_user: Optional[str], ontology_id: Optional[str]):
+    def _select_ontology(self, question: str, as_user: Optional[str], ontology_id: Optional[str], llm=None):
         if ontology_id:
             onto = self.repo.get(ontology_id)
             if onto and self.repo.can_read(onto, as_user):
                 return onto
             return None
         visible = self.repo.list_for_user(as_user)
-        picked = self.router.pick(question, visible)
+        picked = self.router.pick(question, visible, llm=llm)
         return self.repo.get(picked) if picked else None
 
     def start_ask(self, question: str, as_user: Optional[str] = None,
-                  ontology_id: Optional[str] = None, run_id: Optional[str] = None) -> str:
+                  ontology_id: Optional[str] = None, run_id: Optional[str] = None,
+                  llm_name: Optional[str] = None) -> str:
         """同步建 run 并返回 run_id，随后在后台线程执行四段引擎。
 
         关键：start_run 在返回前完成落库，避免前端拿到 run_id 立即轮询 runs/{id} 时出现
-        「Run not found」的时间窗。
+        「Run not found」的时间窗。llm_name 为本次运行选中的规划 LLM（None=用默认）。
         """
         ctx = ExecContext(question, as_user, run_id=run_id)
-        onto = self._select_ontology(question, as_user, ontology_id)
+        ctx.llm_name = llm_name
+        llm = self.registry.llm(llm_name)
+        onto = self._select_ontology(question, as_user, ontology_id, llm=llm)
         ctx.ontology_id = onto.ontology_id if onto else None
 
         ctx.recorder = get_run_recorder()
@@ -79,7 +82,7 @@ class NexusClient:
 
         # 按选中的本体临时装配 compiler/optimizer（引擎无状态、构造廉价）
         scoped = JsonOntology(onto.graph)
-        compiler = Compiler(scoped, self.registry.llm())
+        compiler = Compiler(scoped, self.registry.llm(ctx.llm_name))
         optimizer = Optimizer(scoped, self.registry)
 
         run_state, answer = "done", None
@@ -170,6 +173,15 @@ class NexusClient:
     # ── 数据源探测 / 导入 ──
     def list_resolvers(self) -> list:
         return [{"name": r.name, "type": r.resolver_type} for r in self.registry.all_resolvers()]
+
+    def list_llms(self) -> list:
+        """规划用 LLM 目录（name + is_default），供提问界面下拉。"""
+        return self.registry.list_llms()
+
+    def reload_registry(self) -> dict:
+        """从 DB 重新装配 resolver / llm（源/凭据/LLM 管理保存后即时生效，免重启）。"""
+        self.registry.reload()
+        return {"resolvers": len(self.registry.all_resolvers()), "llms": len(self.registry.list_llms())}
 
     def resolver_schema(self, name: str) -> Optional[dict]:
         r = self.registry.resolver(name)
