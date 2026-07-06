@@ -115,24 +115,37 @@
     </div>
 
     <!-- 关系对话框 -->
-    <el-dialog v-model="relDlg" :title="relEditing ? '编辑关系' : '新建关系'" width="480px">
+    <el-dialog v-model="relDlg" :title="relEditing ? '编辑关系' : '新建关系'" width="460px" class="rel-dialog">
       <div v-if="relForm" class="rel-dlg">
-        <div class="rd-side"><b>从</b>{{ entName(relForm.from_entity) }}
-          <el-select v-model="relForm.from_key" size="small" placeholder="关联键" style="width:150px">
+        <div class="rd-card">
+          <div class="rd-tag">从</div>
+          <div class="rd-ent">{{ entName(relForm.from_entity) }}</div>
+          <el-select v-model="relForm.from_key" placeholder="选择关联键" class="rd-sel">
             <el-option v-for="c in entCols(relForm.from_entity)" :key="c" :value="c" :label="c" />
           </el-select>
         </div>
-        <div class="rd-arrow">⇄</div>
-        <div class="rd-side"><b>到</b>{{ entName(relForm.to_entity) }}
-          <el-select v-model="relForm.to_key" size="small" placeholder="关联键" style="width:150px">
+
+        <div class="rd-join">
+          <span class="rd-line"></span>
+          <span class="rd-badge">＝</span>
+          <span class="rd-line"></span>
+        </div>
+
+        <div class="rd-card">
+          <div class="rd-tag to">到</div>
+          <div class="rd-ent">{{ entName(relForm.to_entity) }}</div>
+          <el-select v-model="relForm.to_key" placeholder="选择关联键" class="rd-sel">
             <el-option v-for="c in entCols(relForm.to_entity)" :key="c" :value="c" :label="c" />
           </el-select>
         </div>
       </div>
       <template #footer>
-        <el-button v-if="relEditing" type="danger" plain @click="deleteRelation">删除</el-button>
-        <el-button @click="relDlg = false">取消</el-button>
-        <el-button type="primary" @click="saveRelation">确定</el-button>
+        <div class="rd-footer">
+          <el-button v-if="relEditing" type="danger" plain @click="deleteRelation">删除</el-button>
+          <span class="rd-spacer"></span>
+          <el-button @click="relDlg = false">取消</el-button>
+          <el-button type="primary" @click="saveRelation">确定</el-button>
+        </div>
       </template>
     </el-dialog>
 
@@ -511,9 +524,48 @@ function slug(s: string) {
 .cl-edit { border-bottom: 1px solid #eef2f6; background: #fbfcfe; padding: 14px 12px; }
 
 .rel-dlg { display: flex; flex-direction: column; gap: 12px; }
-.rd-side { display: flex; align-items: center; gap: 10px; }
-.rd-side b { width: 28px; }
-.rd-arrow { text-align: center; color: var(--beone-slate); }
+.rd-card {
+  position: relative;
+  border: 1px solid #e2e9f2;
+  border-radius: 12px;
+  background: #f8fafd;
+  padding: 14px 16px 16px;
+}
+.rd-tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  color: #3f6ea5;
+  background: #e5eefb;
+  border-radius: 6px;
+  padding: 2px 9px;
+  margin-bottom: 8px;
+}
+.rd-tag.to { color: #2f8f74; background: #e5f5ef; }
+.rd-ent {
+  font-size: 14px;
+  font-weight: 700;
+  color: #26364d;
+  margin-bottom: 10px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+.rd-sel { width: 100%; }
+.rd-join {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 4px;
+}
+.rd-line { flex: 1; height: 1px; background: #dbe3ee; }
+.rd-badge {
+  width: 26px; height: 26px; flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: #eef3fa; color: #5f748a; border: 1px solid #dbe3ee;
+  font-size: 13px; font-weight: 700;
+}
+.rd-footer { display: flex; align-items: center; gap: 8px; }
+.rd-spacer { flex: 1; }
 
 @media (max-width: 900px) {
   .oe-body { padding: 0 10px 10px; }

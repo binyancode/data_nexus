@@ -76,8 +76,15 @@
         <NexusRuntime :run-id="runId" :question="lastQuestion" @done="onRuntimeDone" />
       </section>
 
+      <!-- 初始化中（提交后到拿到 run_id 之间：正在做本体路由 / 建运行，可能较久） -->
+      <section v-else-if="loading" class="init-state">
+        <span class="init-spin"></span>
+        <p class="init-title">正在初始化…</p>
+        <p class="init-sub">选择本体、装配引擎并创建运行，请稍候。</p>
+      </section>
+
       <!-- 空状态 -->
-      <section v-if="!runId && !answerText" class="empty-state">
+      <section v-if="!runId && !answerText && !loading" class="empty-state">
         <el-icon class="empty-icon"><ChatLineRound /></el-icon>
         <p>提问后，这里会显示分析执行过程与答案。</p>
       </section>
@@ -356,4 +363,26 @@ function onRuntimeDone(a: RuntimeAnswer) {
   color: var(--beone-border-strong);
   margin-bottom: 12px;
 }
+
+.init-state {
+  margin-top: 60px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.init-spin {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid rgba(47, 125, 188, 0.18);
+  border-top-color: var(--beone-cerulean-blue);
+  animation: init-rotate 0.8s linear infinite;
+  margin-bottom: 8px;
+}
+@keyframes init-rotate { to { transform: rotate(360deg); } }
+.init-title { font-size: 15px; font-weight: 600; color: var(--beone-text-primary); margin: 0; }
+.init-sub { font-size: 13px; color: var(--beone-text-secondary); margin: 0; }
 </style>
+
