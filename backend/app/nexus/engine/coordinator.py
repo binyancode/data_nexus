@@ -100,6 +100,7 @@ class Coordinator:
             ctx.run_id, node.id, state, _dumps(call),
             _dumps(res.rows), (None if value is None else str(value)[:200]),
             res.source, res.trust, res.error, int((time.time() - t0) * 1000),
+            (_dumps(res.logs) if res.logs else None),
         )
 
     # ── 回填 {nX} ──

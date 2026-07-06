@@ -12,7 +12,10 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from nexus.core.models import SQG, QueryPlan, PlanNode, Operator, ExecContext, topo_waves
+from nexus.core.models import (
+    SQG, QueryPlan, PlanNode, Operator, ExecContext, topo_waves,
+    QuerySpec, QueryJoin, QueryFilter, QueryHaving,
+)
 from nexus.ontology.store import OntologyStore
 
 # 表达式里引用属性概念的记号，如 attribute.sales.amount
@@ -39,7 +42,7 @@ class Optimizer:
     def plan(self, sqg: SQG, ctx: Optional[ExecContext] = None) -> QueryPlan:
         nodes: list[PlanNode] = []
         for node in sqg.nodes:
-            pn = self._plan_node(node)
+            pn = self._plan_node(node, ctx)
             if pn:
                 nodes.append(pn)
 
@@ -57,9 +60,9 @@ class Optimizer:
         return QueryPlan(nodes=nodes, context=context)
 
     # ── 分派 ──
-    def _plan_node(self, node) -> Optional[PlanNode]:
+    def _plan_node(self, node, ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
         if node.operator == Operator.AGGREGATE:
-            return self._plan_aggregate(node)
+            return self._plan_aggregate(node, ctx)
         if node.operator == Operator.ASK:
             return self._plan_ask(node)
         if node.operator == Operator.ACT:
@@ -67,7 +70,7 @@ class Optimizer:
         return None
 
     # ── AGGREGATE → 下推 SQL ──
-    def _plan_aggregate(self, node) -> Optional[PlanNode]:
+    def _plan_aggregate(self, node, ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
         expr = self._aggregate_expr(node)
         if not expr:
             return None
@@ -88,12 +91,25 @@ class Optimizer:
         resolved = self._resolve_attr_aggregate(expr, filters, rank)
         if resolved is None:
             return None
-        sql, params, resolver = resolved
+        spec, resolver = resolved
         if not self._allowed(resolver):
             return None
+        # SQL 文本下沉到 resolver.compile：优化器只交付方言中立的 QuerySpec
+        robj = self.registry.resolver(resolver) if self.registry else None
+        if robj is None:
+            return None
+        call = robj.compile(spec)
+        call["node_id"] = node.id
+        # 记录本节点的 QuerySpec 与 resolver 编译出的调用语句（落 optimizer stage 的 logs，供排查）
+        # call 由各源自定义：SQL 源含 {sql, params}，其它源含各自语句，故通用记整个 call
+        if ctx is not None:
+            ctx.stage_logs.setdefault("nodes", {})[node.id] = {
+                "query_spec": spec.model_dump(),
+                "call": {k: v for k, v in call.items() if k != "node_id"},
+            }
         return PlanNode(
             id=node.id, operator=node.operator, name=node.name, resolver=resolver,
-            call={"node_id": node.id, "sql": sql, "params": params},
+            call=call,
             depends_on=list(node.depends_on),
         )
 
@@ -186,53 +202,50 @@ class Optimizer:
             ent, col = info[tid]
             resolved_expr = resolved_expr.replace(tid, col_ref(ent, col))
 
-        # FROM / JOIN
+        # FROM / JOIN（结构化，别名/关系已解析；具体 SQL 由 resolver 渲染）
         first = ent_order[0]
-        if single:
-            from_sql = meta[first]["table"]
-        else:
-            from_sql = f'{meta[first]["table"]} {meta[first]["alias"]}'
+        from_table = meta[first]["table"]
+        from_alias = None if single else meta[first]["alias"]
+        joins: list[QueryJoin] = []
+        if not single:
             joined = {first}
             for ent in ent_order[1:]:
                 rel = self._find_relation(ent, joined)
                 if not rel:
                     return None
                 fe, fk, te, tk = rel
-                from_sql += (
-                    f' JOIN {meta[ent]["table"]} {meta[ent]["alias"]} ON '
-                    f'{meta[fe]["alias"]}.{fk} = {meta[te]["alias"]}.{tk}'
-                )
+                joins.append(QueryJoin(
+                    table=meta[ent]["table"], alias=meta[ent]["alias"],
+                    on_left=f'{meta[fe]["alias"]}.{fk}',
+                    on_right=f'{meta[te]["alias"]}.{tk}',
+                ))
                 joined.add(ent)
 
-        where, params = self._build_where(filters, meta, single)
+        filter_specs = self._build_where(filters, meta, single)
 
         # 分组 / 排序 / TopN / HAVING
         rank = rank or {}
         group_ok = bool(group_ent and group_col)
-        if group_ok:
-            label_ref = col_ref(group_ent, group_col)
-            top = f"TOP ({int(rank['limit'])}) " if rank.get("limit") else ""
-            sql = f"SELECT {top}{label_ref} AS label, {resolved_expr} AS value FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            sql += f" GROUP BY {label_ref}"
-            if rank.get("having"):
-                sql += f" HAVING {resolved_expr} {rank['having']['op']} ?"
-                params.append(rank['having']['value'])
-            sql += f" ORDER BY value {rank.get('order', 'DESC')}"
-        else:
-            sql = f"SELECT {resolved_expr} AS value FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            # 无 group_by 的 HAVING：整体聚合值过滤
-            if rank.get("having"):
-                sql += f" HAVING {resolved_expr} {rank['having']['op']} ?"
-                params.append(rank['having']['value'])
-        return sql, params, resolver
+        having = None
+        if rank.get("having"):
+            having = QueryHaving(
+                expr=resolved_expr,
+                op=rank["having"]["op"], value=rank["having"]["value"],
+            )
+        spec = QuerySpec(
+            value_expr=resolved_expr,
+            label_expr=col_ref(group_ent, group_col) if group_ok else None,
+            from_table=from_table, from_alias=from_alias,
+            joins=joins, filters=filter_specs,
+            order=rank.get("order", "DESC"),
+            limit=rank.get("limit") if group_ok else None,
+            having=having,
+        )
+        return spec, resolver
 
-    # 过滤条件 → WHERE（维度/度量均可过滤；op 白名单；多实体时加别名前缀）
-    def _build_where(self, filters: list, meta: dict, single: bool):
-        where, params = [], []
+    # 过滤条件 → QueryFilter 列表（维度/度量均可过滤；op 白名单；多实体时加别名前缀）
+    def _build_where(self, filters: list, meta: dict, single: bool) -> list:
+        out: list[QueryFilter] = []
         for f in (filters or []):
             cid = f.get("concept")
             col = self._attr_column(cid)
@@ -252,14 +265,12 @@ class Optimizer:
                 vals = [v for v in vals if v not in (None, "")]
                 if not vals:
                     continue
-                where.append(f"{col} IN ({','.join('?' * len(vals))})")
-                params.extend(vals)
+                out.append(QueryFilter(col=col, op=op, value=vals))
             else:
                 if value in (None, ""):
                     continue
-                where.append(f"{col} {op} ?")
-                params.append(value)
-        return where, params
+                out.append(QueryFilter(col=col, op=op, value=value))
+        return out
 
     # 找一条把 ent 连到已 join 实体的关系
     def _find_relation(self, ent: str, joined: set):

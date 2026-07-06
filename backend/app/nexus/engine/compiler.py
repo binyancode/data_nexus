@@ -32,11 +32,11 @@ class Compiler:
         if self.llm is None:
             return SQG(question=question, nodes=[], context={"error": "no llm configured"})
         try:
-            return self._compile_llm(question)
+            return self._compile_llm(question, ctx)
         except Exception as exc:
             return SQG(question=question, nodes=[], context={"error": f"compile failed: {exc}"})
 
-    def _compile_llm(self, question: str) -> SQG:
+    def _compile_llm(self, question: str, ctx: Optional[ExecContext] = None) -> SQG:
         concepts = self.ontology.list_concepts()
         entities = [c for c in concepts if c.kind == ConceptKind.entity]
         attributes = [c for c in concepts if c.kind == ConceptKind.attribute]
@@ -164,6 +164,9 @@ class Compiler:
             [{"role": "system", "content": system}, {"role": "user", "content": question}],
             schema={"type": "object"},
         )
+        # 记录本次编译的完整提示词（落 run_stage.logs，供排查）
+        if ctx is not None:
+            ctx.stage_logs["prompt"] = {"system": system, "user": question}
         data = out if isinstance(out, dict) else json.loads(out)
         return self._build_sqg(question, data)
 

@@ -32,7 +32,8 @@ class RunRecorder(ABC):
 
     @abstractmethod
     def finish_stage(self, run_id: str, stage: str, state: str,
-                     output: Optional[str], error: Optional[str], cost_ms: int) -> None: ...
+                     output: Optional[str], error: Optional[str], cost_ms: int,
+                     logs: Optional[str] = None) -> None: ...
 
     # ── node（协调器 DAG 节点）──
     @abstractmethod
@@ -41,7 +42,7 @@ class RunRecorder(ABC):
     @abstractmethod
     def finish_node(self, run_id: str, node_id: str, state: str, call: Optional[str],
                     output: Optional[str], value: Optional[str], source: str, trust: float,
-                    error: Optional[str], cost_ms: int) -> None: ...
+                    error: Optional[str], cost_ms: int, logs: Optional[str] = None) -> None: ...
 
 
 class NullRunRecorder(RunRecorder):
@@ -50,9 +51,9 @@ class NullRunRecorder(RunRecorder):
     def start_run(self, run_id, question, as_user, ontology_id=None): pass
     def finish_run(self, run_id, state, answer, cost_ms): pass
     def start_stage(self, run_id, stage, input): pass
-    def finish_stage(self, run_id, stage, state, output, error, cost_ms): pass
+    def finish_stage(self, run_id, stage, state, output, error, cost_ms, logs=None): pass
     def start_node(self, run_id, node_id, resolver, call): pass
-    def finish_node(self, run_id, node_id, state, call, output, value, source, trust, error, cost_ms): pass
+    def finish_node(self, run_id, node_id, state, call, output, value, source, trust, error, cost_ms, logs=None): pass
 
 
 _NULL = NullRunRecorder()

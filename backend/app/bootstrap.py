@@ -92,12 +92,12 @@ class DbRunRecorder(RunRecorder):
             (run_id, stage, _STAGE_SEQ.get(stage, 0), input),
         )
 
-    def finish_stage(self, run_id, stage, state, output, error, cost_ms):
+    def finish_stage(self, run_id, stage, state, output, error, cost_ms, logs=None):
         self._exec(
             """UPDATE nexus.run_stage
-                  SET [state] = ?, [output] = ?, error = ?, cost_ms = ?, ended_at = SYSUTCDATETIME()
+                  SET [state] = ?, [output] = ?, error = ?, cost_ms = ?, logs = ?, ended_at = SYSUTCDATETIME()
                 WHERE run_id = ? AND stage = ?""",
-            (state, output, error, cost_ms, run_id, stage),
+            (state, output, error, cost_ms, logs, run_id, stage),
         )
 
     # ── node ──
@@ -108,13 +108,13 @@ class DbRunRecorder(RunRecorder):
             (run_id, node_id, resolver, call),
         )
 
-    def finish_node(self, run_id, node_id, state, call, output, value, source, trust, error, cost_ms):
+    def finish_node(self, run_id, node_id, state, call, output, value, source, trust, error, cost_ms, logs=None):
         self._exec(
             """UPDATE nexus.run_node
                   SET [state] = ?, [call] = ?, [output] = ?, [value] = ?, [source] = ?,
-                      trust = ?, error = ?, cost_ms = ?, ended_at = SYSUTCDATETIME()
+                      trust = ?, error = ?, cost_ms = ?, logs = ?, ended_at = SYSUTCDATETIME()
                 WHERE run_id = ? AND node_id = ?""",
-            (state, call, output, value, source, trust, error, cost_ms, run_id, node_id),
+            (state, call, output, value, source, trust, error, cost_ms, logs, run_id, node_id),
         )
 
 

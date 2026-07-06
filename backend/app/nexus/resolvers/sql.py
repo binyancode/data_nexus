@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from services.sql_db import sql_db
-from nexus.core.models import NodeResult, ExecContext
+from nexus.core.models import NodeResult, ExecContext, QuerySpec
 from nexus.resolvers.base import Resolver
 
 
@@ -29,9 +29,17 @@ def _coarse_type(raw: str) -> str:
 
 
 class SqlResolver(Resolver):
+    """标准 SQL 取数源（默认 SQL Server / Azure SQL 语法）。
+
+    任何 SQL 兼容库都可直接复用；个别语法有差异的库（如 Databricks 用 LIMIT）
+    子类化本类、覆写 `_limit_clause` 一个方法即可，无需另建方言体系。
+    """
+
     resolver_type = "sql"
     provides_concepts = True
     operators = {"SELECT", "FILTER", "AGGREGATE", "JOIN"}
+
+    placeholder = "?"          # 参数占位符（pyodbc = ?）
 
     def __init__(self, name: str, config: dict = None):
         super().__init__(name, config)
@@ -41,6 +49,59 @@ class SqlResolver(Resolver):
     @property
     def _source(self) -> str:
         return f"{self.name}:{self.config.get('database', '')}"
+
+    # ── QuerySpec → SQL 渲染（优化器只给方言中立的 spec，语法在这里落地）──
+    def _limit_clause(self, spec: QuerySpec) -> tuple[str, str]:
+        """TopN 语法：返回 (SELECT 前缀, 末尾后缀)。
+        SQL Server 用 `SELECT TOP (n)`；用 LIMIT 的库覆写成 ('', ' LIMIT n')。"""
+        if spec.limit and spec.label_expr:
+            return f"TOP ({int(spec.limit)}) ", ""
+        return "", ""
+
+    def compile(self, spec: QuerySpec) -> dict:
+        """QuerySpec → {sql, params}。"""
+        params: list = []
+
+        # FROM / JOIN
+        if spec.from_alias:
+            from_sql = f"{spec.from_table} {spec.from_alias}"
+            for j in spec.joins:
+                from_sql += f" JOIN {j.table} {j.alias} ON {j.on_left} = {j.on_right}"
+        else:
+            from_sql = spec.from_table
+
+        # WHERE
+        where: list[str] = []
+        for f in spec.filters:
+            if f.op == "IN":
+                vals = f.value if isinstance(f.value, list) else [f.value]
+                where.append(f"{f.col} IN ({','.join([self.placeholder] * len(vals))})")
+                params.extend(vals)
+            else:
+                where.append(f"{f.col} {f.op} {self.placeholder}")
+                params.append(f.value)
+
+        top, tail = self._limit_clause(spec)
+
+        if spec.label_expr:
+            sql = f"SELECT {top}{spec.label_expr} AS label, {spec.value_expr} AS value FROM {from_sql}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += f" GROUP BY {spec.label_expr}"
+            if spec.having:
+                sql += f" HAVING {spec.value_expr} {spec.having.op} {self.placeholder}"
+                params.append(spec.having.value)
+            sql += f" ORDER BY value {spec.order}"
+            sql += tail
+        else:
+            sql = f"SELECT {spec.value_expr} AS value FROM {from_sql}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            if spec.having:
+                sql += f" HAVING {spec.value_expr} {spec.having.op} {self.placeholder}"
+                params.append(spec.having.value)
+
+        return {"sql": sql, "params": params}
 
     def fetch(self, call: dict, ctx: Optional[ExecContext] = None) -> NodeResult:
         node_id = call.get("node_id", "")

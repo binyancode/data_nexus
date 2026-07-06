@@ -113,6 +113,46 @@ class QueryPlan(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)  # 优化器 → 协调器 交接包
 
 
+# ───────────────── 取数规格（方言中立，优化器 → resolver 交接） ─────────────────
+class QueryJoin(BaseModel):
+    """一条 JOIN：把某表按 on_left = on_right 接进来。"""
+    table: str
+    alias: str
+    on_left: str        # 如 "t0.customer_id"
+    on_right: str       # 如 "t1.id"
+
+
+class QueryFilter(BaseModel):
+    """一条过滤：列引用 + 归一化算子 + 值（IN 时 value 为 list）。"""
+    col: str            # 已解析的列引用（多表时带别名前缀）
+    op: str             # 归一化算子：= <> > >= < <= LIKE IN
+    value: Any = None
+
+
+class QueryHaving(BaseModel):
+    """聚合后过滤（HAVING）。"""
+    expr: str           # 已解析的聚合值表达式
+    op: str
+    value: Any = None
+
+
+class QuerySpec(BaseModel):
+    """方言中立的取数规格。
+
+    优化器负责把逻辑概念解析成物理绑定（表/列/JOIN/别名/表达式），产出本规格；
+    具体 SQL 文本由 resolver.compile 按各自方言渲染，优化器不再拼 SQL 字符串。
+    """
+    value_expr: str                       # 聚合值表达式（属性已解析成物理列）
+    label_expr: Optional[str] = None      # 分组维度列引用（None = 不分组）
+    from_table: str = ""                  # 首实体物理表
+    from_alias: Optional[str] = None      # 多表时首表别名（None = 单表不带别名）
+    joins: list[QueryJoin] = Field(default_factory=list)
+    filters: list[QueryFilter] = Field(default_factory=list)
+    order: str = "DESC"                   # ASC / DESC（仅分组时用）
+    limit: Optional[int] = None           # TopN（仅分组时用）
+    having: Optional[QueryHaving] = None
+
+
 def topo_waves(nodes: list) -> list[list]:
     """按 depends_on 拓扑分波：返回 [[wave1节点...], [wave2...], ...]。
     适用于任何带 .id / .depends_on 的节点（SQGNode / PlanNode 均可）。"""
@@ -153,6 +193,7 @@ class NodeResult(BaseModel):
     error: Optional[str] = None
     source: str = ""
     detail: str = ""
+    logs: dict[str, Any] = Field(default_factory=dict)   # 自定义日志（JSON），如 ASK 生成的完整提示词
 
 
 class Answer(BaseModel):
@@ -180,6 +221,7 @@ class ExecContext:
         self.started_at = time.time()
         self.results: dict[str, NodeResult] = {}   # node_id -> NodeResult
         self.context: dict[str, Any] = {}          # 引擎间交接包（携 plan.context）
+        self.stage_logs: dict[str, Any] = {}        # 当前 stage 的自定义日志（JSON），每段前清空
         self.recorder: RunRecorder = NullRunRecorder()  # 运行记录器（由 client 注入）
 
     @property

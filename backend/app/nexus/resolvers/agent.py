@@ -39,7 +39,9 @@ class AgentResolver(Resolver):
                 node_id=node_id, resolver=self.name, output=text,
                 rows=[{"value": text}], trust=0.8,
                 source=f"{self.name}:llm", detail=prompt[:300],
+                logs={"prompt": {"system": system, "user": prompt}},
             )
         except Exception as exc:
             return NodeResult(node_id=node_id, resolver=self.name, error=str(exc),
-                              source=f"{self.name}:llm", detail=prompt[:300])
+                              source=f"{self.name}:llm", detail=prompt[:300],
+                              logs={"prompt": {"system": system, "user": prompt}})

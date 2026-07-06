@@ -29,6 +29,12 @@ def _dumps(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
 
 
+def _stage_logs_json(ctx: ExecContext) -> Optional[str]:
+    """当前 stage 的自定义日志缓冲 → JSON（空则 None，不落列）。"""
+    logs = getattr(ctx, "stage_logs", None)
+    return _dumps(logs) if logs else None
+
+
 class NexusClient:
     def __init__(self, config: dict = None):
         conf = config or {}
@@ -139,15 +145,17 @@ class NexusClient:
                input_json: Optional[str], out_ser: Callable) -> object:
         rec = ctx.recorder
         t0 = time.time()
+        ctx.stage_logs = {}                       # 每段前清空自定义日志缓冲
         rec.start_stage(ctx.run_id, stage, input_json)
         try:
             result = fn()
         except Exception:
             rec.finish_stage(ctx.run_id, stage, "failed", None,
-                             traceback.format_exc(), int((time.time() - t0) * 1000))
+                             traceback.format_exc(), int((time.time() - t0) * 1000),
+                             _stage_logs_json(ctx))
             raise
         rec.finish_stage(ctx.run_id, stage, "done", out_ser(result), None,
-                         int((time.time() - t0) * 1000))
+                         int((time.time() - t0) * 1000), _stage_logs_json(ctx))
         return result
 
     # ── 本体管理（供 API 层）──
