@@ -78,7 +78,9 @@ class SqlResolver(Resolver):
                 where.append(f"{f.col} IN ({','.join([self.placeholder] * len(vals))})")
                 params.extend(vals)
             else:
-                where.append(f"{f.col} {f.op} {self.placeholder}")
+                # 日期过滤：value_format 存在时显式转 date（ISO 值 TRY_CONVERT 可靠推断）
+                rhs = f"TRY_CONVERT(date, {self.placeholder})" if f.value_format else self.placeholder
+                where.append(f"{f.col} {f.op} {rhs}")
                 params.append(f.value)
 
         top, tail = self._limit_clause(spec)

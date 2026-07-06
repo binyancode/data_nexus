@@ -4,9 +4,9 @@
     <div class="iw">
       <div class="iw-row">
         <label>数据源（Resolver）</label>
-        <el-select v-model="resolver" placeholder="选择 SQL 数据源" style="width: 100%" @change="loadSchema">
+        <el-select v-model="resolver" placeholder="选择数据源" style="width: 100%" @change="loadSchema">
           <el-option v-for="r in resolvers" :key="r.name" :value="r.name"
-                     :label="`${r.name}（${r.type}）`" :disabled="r.type !== 'sql'" />
+                     :label="`${r.name}（${r.type}）`" />
         </el-select>
       </div>
 
@@ -63,7 +63,7 @@ async function onOpen() {
   schema.value = {}
   resolver.value = ''
   try {
-    resolvers.value = (await listResolvers()).filter((r) => r.type === 'sql')
+    resolvers.value = (await listResolvers()).filter((r) => r.provides_concepts === true)
     const first = resolvers.value[0]
     if (resolvers.value.length === 1 && first) { resolver.value = first.name; await loadSchema() }
   } catch (e: any) { ElMessage.error('加载数据源失败：' + (e?.message || e)) }

@@ -8,13 +8,19 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 
 def _local(table: str) -> str:
-    """schema.table → 去 schema 的本地名（用于 id）。"""
-    name = table.split(".")[-1]
-    return re.sub(r"[^A-Za-z0-9_]", "_", name)
+    """物理表名 → 去前缀/扩展名的本地名（用于 id）。
+    兼容 SQL 的 schema.table 与 CSV 的 文件名.扩展名 / glob。"""
+    name = os.path.basename(table.replace("\\", "/"))          # 取 basename（CSV 路径/glob）
+    name = re.sub(r"\.(csv|tsv|txt|parquet|json)$", "", name, flags=re.I)  # 剥数据文件扩展名
+    if "." in name:                                            # 仍带点 → schema.table，取末段
+        name = name.split(".")[-1]
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_")
+    return cleaned or "t"
 
 
 def build_fragment(resolver_name: str, describe: dict, primary_keys: dict,

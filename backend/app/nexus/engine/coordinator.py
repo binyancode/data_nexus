@@ -16,7 +16,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from nexus.core.models import QueryPlan, PlanNode, NodeResult, ExecContext, topo_waves
+from nexus.core.models import QueryPlan, PlanNode, NodeResult, ExecContext, Operator, topo_waves
 from nexus.registry import ResolverRegistry
 
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
@@ -96,11 +96,15 @@ class Coordinator:
         ctx.results[node.id] = res
         state = "failed" if res.error else "done"
         value = _result_value(res)
+        # 自定义日志：取数类节点额外记 resolver 返回的行数
+        node_logs = dict(res.logs) if res.logs else {}
+        if node.operator not in (Operator.ASK, Operator.ACT) and isinstance(res.rows, list):
+            node_logs["row_count"] = len(res.rows)
         ctx.recorder.finish_node(
             ctx.run_id, node.id, state, _dumps(call),
             _dumps(res.rows), (None if value is None else str(value)[:200]),
             res.source, res.trust, res.error, int((time.time() - t0) * 1000),
-            (_dumps(res.logs) if res.logs else None),
+            (_dumps(node_logs) if node_logs else None),
         )
 
     # ── 回填 {nX} ──

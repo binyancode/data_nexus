@@ -12,6 +12,7 @@ from utils.logger import get_logger
 
 from nexus.resolvers.base import Resolver
 from nexus.resolvers.sql import SqlResolver
+from nexus.resolvers.csv import CsvResolver
 from nexus.resolvers.agent import AgentResolver
 from nexus.resolvers.action import ActionResolver
 from nexus.llm.base import LLMProvider
@@ -22,6 +23,7 @@ _logger = get_logger("registry")
 # 类型 → 实现类
 _RESOLVER_TYPES: dict[str, type] = {
     "sql": SqlResolver,
+    "csv": CsvResolver,
     "agent": AgentResolver,
     "action": ActionResolver,
 }

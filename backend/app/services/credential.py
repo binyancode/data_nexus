@@ -145,9 +145,38 @@ class azure_openai_credential(credential):
         return conf
 
 
+class local_file_credential(credential):
+    """本地文件（夹）凭据。base_dir 必填；filename 可选。
+
+    filename 语义（决定实体粒度）：
+      - 空          → 整个文件夹作为一个实体（describe 返回 `*.csv`，运行时合并）
+      - 具体文件名  → 该单文件作为一个实体
+      - 通配符      → 匹配到的每个文件各作为一个实体
+    """
+
+    display_name: str = "本地文件"
+    description: str = "本地文件夹作为 CSV 数据源。filename 空=文件夹整体一个实体；具体名=单文件；通配符=逐文件。"
+    schema: list[dict] = [
+        {"name": "base_dir", "type": "string", "required": True, "sensitive": False, "description": "本地文件夹绝对路径"},
+        {"name": "filename", "type": "string", "required": False, "sensitive": False, "description": "文件名（空=文件夹合并；具体名=单文件；通配符如 *.csv=逐文件）"},
+    ]
+
+    def __init__(self, name: str, credential_type: str, data: dict):
+        super().__init__(name, credential_type, data)
+        if not self._data.get("base_dir"):
+            raise ValueError(f"local_file_credential {name!r} missing required field: base_dir")
+
+    def to_config(self) -> dict:
+        conf = {"base_dir": self._data["base_dir"]}
+        if self._data.get("filename"):
+            conf["filename"] = self._data["filename"]
+        return conf
+
+
 # 注册内置凭据类型
 credential.register_type("sql", sql_credential)
 credential.register_type("azure_openai", azure_openai_credential)
+credential.register_type("local_file", local_file_credential)
 
 
 # ---------------------------------------------------------------------------

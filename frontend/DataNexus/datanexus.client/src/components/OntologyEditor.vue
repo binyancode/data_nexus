@@ -89,6 +89,10 @@
                   <el-select v-model="a.synonyms" multiple filterable allow-create default-first-option
                              :disabled="!meta?.canEdit" size="small" style="width:100%" placeholder="回车添加" />
                 </div>
+                <div class="fld"><label>描述（给大模型的提示）</label>
+                  <el-input v-model="a.semantics" type="textarea" :rows="2" :disabled="!meta?.canEdit" size="small"
+                            placeholder="如：字符串型季度，格式 YYYYQn（2025Q1）；「第一季度」→ 2025Q1" />
+                </div>
                 <div class="fld"><label>物理列 · 类型</label>
                   <el-input :model-value="`${a.column || ''}  ·  ${a.dtype || '?'}`" disabled size="small" class="mono" />
                 </div>

@@ -35,8 +35,10 @@ export function deleteResolverAdmin(name: string): Promise<any> {
 }
 
 // resolver 类型 → 兼容的 credential 类型（action 无需凭据）
-export const RESOLVER_CRED_TYPE: Record<string, string | null> = {
-  sql: 'sql',
-  agent: 'azure_openai',
-  action: null,
+// resolver 类型 → 兼容的 credential 类型（可多个；action 无需凭据）
+export const RESOLVER_CRED_TYPE: Record<string, string[]> = {
+  sql: ['sql'],
+  csv: ['local_file'],
+  agent: ['azure_openai'],
+  action: [],
 }

@@ -127,6 +127,7 @@ class QueryFilter(BaseModel):
     col: str            # 已解析的列引用（多表时带别名前缀）
     op: str             # 归一化算子：= <> > >= < <= LIKE IN
     value: Any = None
+    value_format: Optional[str] = None   # 日期值的格式（token 式，如 yyyy-MM-dd）；非日期为 None
 
 
 class QueryHaving(BaseModel):

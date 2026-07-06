@@ -40,16 +40,17 @@
         <label>类型</label>
         <el-select v-model="form.resolver_type" :disabled="editing" style="width:100%" @change="onTypeChange">
           <el-option value="sql" label="SQL 数据源" />
+          <el-option value="csv" label="CSV（本地文件）" />
           <el-option value="agent" label="Agent（LLM）" />
           <el-option value="action" label="Action（动作）" />
         </el-select>
       </div>
-      <div class="fld" v-if="credType">
-        <label>凭据（{{ credType }} 类型）</label>
+      <div class="fld" v-if="needCred">
+        <label>凭据（{{ credTypes.join(' / ') }} 类型）</label>
         <el-select v-model="form.credential_name" style="width:100%" placeholder="选择一个凭据" filterable>
           <el-option v-for="c in compatCreds" :key="c.credential_name" :value="c.credential_name" :label="c.credential_name" />
         </el-select>
-        <div class="hint" v-if="!compatCreds.length">没有 {{ credType }} 类型的凭据，请先到「凭据」页新增。</div>
+        <div class="hint" v-if="!compatCreds.length">没有 {{ credTypes.join(' / ') }} 类型的凭据，请先到「凭据」页新增。</div>
       </div>
       <div class="fld" v-else>
         <div class="hint">该类型无需凭据。</div>
@@ -82,7 +83,7 @@ import {
 import { listCredentials, type CredentialListItem } from '../bff/Credentials.js'
 import { reloadRegistry } from '../backend/Registry.js'
 
-const TYPE_LABELS: Record<string, string> = { sql: 'SQL 数据源', agent: 'Agent（LLM）', action: 'Action（动作）' }
+const TYPE_LABELS: Record<string, string> = { sql: 'SQL 数据源', csv: 'CSV（本地文件）', agent: 'Agent（LLM）', action: 'Action（动作）' }
 
 const items = ref<ResolverAdminItem[]>([])
 const creds = ref<CredentialListItem[]>([])
@@ -95,15 +96,16 @@ const form = reactive<{ resolver_name: string; resolver_type: string; credential
   resolver_name: '', resolver_type: 'sql', credential_name: '', config: '', is_active: true,
 })
 
-const credType = computed(() => RESOLVER_CRED_TYPE[form.resolver_type] ?? null)
-const compatCreds = computed(() => creds.value.filter((c) => c.credential_type === credType.value))
+const credTypes = computed(() => RESOLVER_CRED_TYPE[form.resolver_type] ?? [])
+const needCred = computed(() => credTypes.value.length > 0)
+const compatCreds = computed(() => creds.value.filter((c) => credTypes.value.includes(c.credential_type)))
 const isValidConfig = computed(() => {
   if (!form.config.trim()) return true
   try { JSON.parse(form.config); return true } catch { return false }
 })
 const canSubmit = computed(() => {
   if (!form.resolver_name.trim() || !form.resolver_type || !isValidConfig.value) return false
-  if (credType.value && !form.credential_name) return false   // 需要凭据的类型必须选
+  if (needCred.value && !form.credential_name) return false   // 需要凭据的类型必须选
   return true
 })
 
@@ -126,7 +128,7 @@ function reset() {
   editing.value = false
 }
 function onTypeChange() { form.credential_name = '' }
-function openCreate() { reset(); editing.value = false; dlg.value = true }
+function openCreate() { reset(); editing.value = false; loadCreds(); dlg.value = true }
 function openEdit(row: ResolverAdminItem) {
   reset()
   editing.value = true
@@ -135,6 +137,7 @@ function openEdit(row: ResolverAdminItem) {
   form.credential_name = row.credential_name || ''
   form.config = row.config && row.config !== '{}' ? row.config : ''
   form.is_active = row.is_active
+  loadCreds()
   dlg.value = true
 }
 
@@ -143,7 +146,7 @@ async function submit() {
   try {
     const payload = {
       resolver_name: form.resolver_name.trim(), resolver_type: form.resolver_type,
-      credential_name: credType.value ? (form.credential_name || null) : null,
+      credential_name: needCred.value ? (form.credential_name || null) : null,
       config: form.config.trim() || '{}', is_active: form.is_active,
     }
     if (editing.value) await updateResolverAdmin(form.resolver_name, payload)

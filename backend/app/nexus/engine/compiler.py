@@ -43,8 +43,9 @@ class Compiler:
         metrics = [c for c in concepts if c.kind == ConceptKind.metric]
         derivations = [c for c in concepts if c.kind == ConceptKind.derivation]
         actions = [c for c in concepts if c.kind == ConceptKind.action]
-        if not metrics:
-            return SQG(question=question, nodes=[], context={"error": "no metrics in ontology"})
+        # 临时聚合让 metric 变可选：只要有实体（带度量属性）即可取数；空本体才拒绝
+        if not entities and not metrics:
+            return SQG(question=question, nodes=[], context={"error": "ontology has no entities or metrics"})
 
         # 按实体列出维度 / 度量（带粗类型 dtype、度量带可加性 additivity）
         attrs_by_entity: dict[str, list] = {}
@@ -54,10 +55,11 @@ class Compiler:
         def attr_desc(a) -> str:
             syn = ("/" + "/".join(a.synonyms)) if a.synonyms else ""
             dt = a.attrs.get("dtype") or "?"
+            desc = f"·描述={a.semantics}" if a.semantics else ""
             if a.attrs.get("role") == "measure":
                 add = a.attrs.get("additivity") or "additive"
-                return f"{a.id}（{a.name}{syn}·{dt}·可加性={add}）"
-            return f"{a.id}（{a.name}{syn}·{dt}）"
+                return f"{a.id}（{a.name}{syn}·{dt}·可加性={add}{desc}）"
+            return f"{a.id}（{a.name}{syn}·{dt}{desc}）"
 
         def ent_block(e) -> str:
             al = attrs_by_entity.get(e.id, [])
@@ -108,11 +110,12 @@ class Compiler:
             '  {"id":"n2","operator":"AGGREGATE","name":"订单数量总和(临时聚合)","concept":null,"params":{"measure":"<度量attribute id>","agg":"SUM","filters":[]},"depends_on":[]}',
             '  {"id":"n3","operator":"AGGREGATE","name":"订单数量前三的产品","concept":null,"params":{"measure":"<度量attribute id>","agg":"SUM","group_by":"<维度attribute id>","order":"desc","limit":3},"depends_on":[]}',
             '  {"id":"n4","operator":"AGGREGATE","name":"总销量超1000的产品","concept":null,"params":{"measure":"<度量attribute id>","agg":"SUM","group_by":"<维度attribute id>","having":{"op":">","value":1000},"order":"desc"},"depends_on":[]}',
+            '  {"id":"n5","operator":"AGGREGATE","name":"2024年7月销售额","concept":null,"params":{"measure":"<度量attribute id>","agg":"SUM","filters":[{"concept":"<date类型attribute id>","op":">=","value":"2024-07-01","value_format":"yyyy-MM-dd"},{"concept":"<date类型attribute id>","op":"<","value":"2024-08-01","value_format":"yyyy-MM-dd"}]},"depends_on":[]}',
         ]
         if has_ask:
-            ex_nodes.append('  {"id":"n5","operator":"ASK","name":"结果分析","concept":null,"params":{"prompt":"以下是查询结果：{n3}。请用中文分析并给出简明结论。"},"depends_on":["n3"]}')
+            ex_nodes.append('  {"id":"n6","operator":"ASK","name":"结果分析","concept":null,"params":{"prompt":"以下是查询结果：{n3}。请用中文分析并给出简明结论。"},"depends_on":["n3"]}')
         if has_act:
-            ex_nodes.append('  {"id":"n6","operator":"ACT","name":"建复盘任务","concept":null,"params":{"desc":"复盘：{n5}","assignee":"华东"},"depends_on":["n5"]}')
+            ex_nodes.append('  {"id":"n7","operator":"ACT","name":"建复盘任务","concept":null,"params":{"desc":"复盘：{n6}","assignee":"华东"},"depends_on":["n6"]}')
 
         rules = [
             "- 每个要对比/分析的数值都拆成**独立的 AGGREGATE 节点**，不要把多个地区或多个指标塞进一个节点。",
@@ -121,7 +124,9 @@ class Compiler:
             "- filters：维度和度量都可过滤，元素为 {concept, op, value}；op ∈ = != > >= < <= like in（默认 =）；维度常用等值，度量常用比较（如 amount > 1000）。in 的 value 是数组。",
             "- group_by 只能用**维度** attribute id；排名/TopN 用 group_by + order(desc/asc) + limit。",
             "- 聚合后过滤（HAVING，如「总销量超1000的产品」）：在该 AGGREGATE 节点 params 加 having:{op,value}，作用在聚合值上，配合 group_by。",
-            "- 过滤取值：地区用中文（华东/华南/华北/华中），期间用 YYYYQn（如 2024Q1）；「上季度」按 2024Q1。",
+            "- 日期(date 类型)属性的期间过滤必须用**区间**表达，不要拿日期列等于一个「年/月/季」字符串（那样没有意义）。某月/季/年 = 该期间起始日(含)到下一期间起始日(不含)，用两个过滤：{op:'>=',value:'2024-07-01'} 和 {op:'<',value:'2024-08-01'}（如2024年7月）。",
+            "- 每个 date 类型的过滤都要带 value_format 字段说明 value 的格式（用完整日期 'yyyy-MM-dd'）。文本型维度用等值、不需要 value_format。",
+            "- 属性若带「描述」，按描述理解其含义与**取值格式**（如字符串型期间列的格式），过滤 value 按该格式生成，不要臆造。",
         ]
         if has_ask:
             rules.append("- 只要用户意图含「分析/为什么/对比/归因/解读」等，就**必须**加一个 ASK 节点：depends_on 指向相关 AGGREGATE，params.prompt 用 {nX} 回填上游结果并要求给出结论；concept 可选（有具名分析能力就填其 id，否则用 null）。")
@@ -213,5 +218,8 @@ class Compiler:
                 continue
             c = self.ontology.get_concept(cid)
             if c and c.kind == ConceptKind.attribute:
-                out.append({"concept": cid, "op": op, "value": value})
+                item = {"concept": cid, "op": op, "value": value}
+                if f.get("value_format"):
+                    item["value_format"] = f["value_format"]
+                out.append(item)
         return out

@@ -123,17 +123,19 @@ class Optimizer:
         if not measure:
             return None
         mc = self.ontology.get_concept(measure)
-        if not mc or mc.attrs.get("role") != "measure":
+        if not mc:
             return None
         agg = (node.params.get("agg") or "SUM").upper()
         if agg not in _AGG_FUNCS:
             return None
         dtype = mc.attrs.get("dtype")
-        if agg in _AGG_NEEDS_NUMBER and dtype not in (None, "number"):
-            return None
-        additivity = mc.attrs.get("additivity")
-        if additivity == "non_additive" and agg == "SUM":
-            return None   # 比率/百分比等不可加：禁 SUM
+        if agg in _AGG_NEEDS_NUMBER:
+            # SUM/AVG：只对数值度量有意义
+            if mc.attrs.get("role") != "measure" or dtype not in (None, "number"):
+                return None
+            if mc.attrs.get("additivity") == "non_additive" and agg == "SUM":
+                return None   # 比率/百分比等不可加：禁 SUM
+        # MIN/MAX/COUNT：对任意属性（数值/日期/文本/维度）都合法，不要求 role=measure
         return f"{agg}({measure})"
 
     def _clean_having(self, having):
@@ -269,7 +271,8 @@ class Optimizer:
             else:
                 if value in (None, ""):
                     continue
-                out.append(QueryFilter(col=col, op=op, value=value))
+                out.append(QueryFilter(col=col, op=op, value=value,
+                                       value_format=f.get("value_format")))
         return out
 
     # 找一条把 ent 连到已 join 实体的关系
