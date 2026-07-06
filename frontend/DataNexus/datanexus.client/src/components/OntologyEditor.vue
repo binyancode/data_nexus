@@ -24,7 +24,7 @@
     <div class="oe-desc ro" v-else-if="description">{{ description }}</div>
 
     <!-- 主体：画板 + 侧栏 -->
-    <div class="oe-body">
+    <div class="oe-body" v-loading="loading" element-loading-text="加载本体…">
       <div class="oe-canvas">
         <OntologyCanvas
           :graph="graph" :editable="!!meta?.canEdit" :selected-entity="selEntityId"
@@ -254,6 +254,7 @@ const graph = ref<OntologyGraph>(emptyGraph())
 const name = ref('')
 const description = ref('')
 const saving = ref(false)
+const loading = ref(true)          // 初始即加载态，打开时立刻显示
 
 const visLabel = computed(() => ({ private: '私有', shared: '共享', public: '公开' } as any)[meta.value?.visibility || 'private'])
 
@@ -280,6 +281,7 @@ function startResize(e: MouseEvent) {
 
 onMounted(load)
 async function load() {
+  loading.value = true
   // 先拿到 resolver 能力（provides_concepts），syncSqlResolvers 才能正确区分能力源
   try { allResolvers.value = await listResolvers() } catch { /* ignore */ }
   try {
@@ -295,6 +297,7 @@ async function load() {
     }
     syncSqlResolvers()
   } catch (e: any) { ElMessage.error('加载失败：' + (e?.message || e)) }
+  finally { loading.value = false }
 }
 
 // ── 本体挂载的 resolver（能力集）──
