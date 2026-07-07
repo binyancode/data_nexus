@@ -18,8 +18,8 @@ from nexus.core.models import SQG, SQGNode, Operator, ConceptKind, ExecContext
 from nexus.engine.relations import connected
 
 _ALLOWED_OPS = {"AGGREGATE", "ASK", "ACT", "SELECT", "FILTER", "JOIN"}
-# 指标口径表达式里引用属性概念的记号，如 attribute.sales.amount
-_ATTR_TOKEN = re.compile(r"attribute(?:\.[A-Za-z0-9_]+)+")
+# 指标口径表达式里引用属性概念的记号，如 attribute.sales.amount（可带本体命名空间前缀 onto_x::）
+_ATTR_TOKEN = re.compile(r"(?:[A-Za-z0-9_]+::)?attribute(?:\.[A-Za-z0-9_]+)+")
 
 
 class Compiler:

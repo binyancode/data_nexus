@@ -99,7 +99,7 @@ class NexusClient:
                           text="找不到可用（或有权访问）的本体。", status="error")
 
         # 按选中的本体临时装配 compiler/optimizer（引擎无状态、构造廉价）
-        scoped = JsonOntology(onto.graph)
+        scoped = JsonOntology(onto.graph, ns=onto.ontology_id)
         # 本体作用域：允许使用的 resolver 名集合 + 可用算子集（所挂 resolver 的能力并集）
         allowed = ontology_resolver_names(onto.graph)
         available_ops: set[str] = set()

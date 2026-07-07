@@ -20,8 +20,8 @@ from nexus.core.models import (
 from nexus.ontology.store import OntologyStore
 from nexus.engine.relations import join_tree
 
-# 表达式里引用属性概念的记号，如 attribute.sales.amount
-_ATTR_TOKEN = re.compile(r"attribute(?:\.[A-Za-z0-9_]+)+")
+# 表达式里引用属性概念的记号，如 attribute.sales.amount（可带本体命名空间前缀 onto_x::）
+_ATTR_TOKEN = re.compile(r"(?:[A-Za-z0-9_]+::)?attribute(?:\.[A-Za-z0-9_]+)+")
 
 # 过滤操作符白名单（防注入）；键=LLM 给的 op，值=拼进 SQL 的算子
 _FILTER_OPS = {"=": "=", "!=": "<>", "<>": "<>", ">": ">", ">=": ">=",
