@@ -26,6 +26,9 @@ class RunRecorder(ABC):
     @abstractmethod
     def finish_run(self, run_id: str, state: str, answer: Optional[str], cost_ms: int) -> None: ...
 
+    @abstractmethod
+    def set_run_ontology(self, run_id: str, ontology_id: Optional[str]) -> None: ...
+
     # ── stage（四个引擎）──
     @abstractmethod
     def start_stage(self, run_id: str, stage: str, input: Optional[str]) -> None: ...
@@ -50,6 +53,7 @@ class NullRunRecorder(RunRecorder):
 
     def start_run(self, run_id, question, as_user, ontology_id=None): pass
     def finish_run(self, run_id, state, answer, cost_ms): pass
+    def set_run_ontology(self, run_id, ontology_id): pass
     def start_stage(self, run_id, stage, input): pass
     def finish_stage(self, run_id, stage, state, output, error, cost_ms, logs=None): pass
     def start_node(self, run_id, node_id, resolver, call): pass

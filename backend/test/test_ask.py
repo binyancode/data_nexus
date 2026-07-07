@@ -22,13 +22,11 @@ from nexus.core.run_log import get_run_recorder
 
 
 def _ask_sync(nexus: NexusClient, question: str):
-    """同步版：建 ctx + 选本体 + 落 run，然后直接执行 ask(ctx, onto)。"""
+    """同步版：建 ctx + 落 run，直接执行 ask(ctx)（选本体在初始化器段内完成）。"""
     ctx = ExecContext(question)
-    onto = nexus._select_ontology(question, None, None)
-    ctx.ontology_id = onto.ontology_id if onto else None
     ctx.recorder = get_run_recorder()
-    ctx.recorder.start_run(ctx.run_id, question, None, ctx.ontology_id)
-    return nexus.ask(ctx, onto)
+    ctx.recorder.start_run(ctx.run_id, question, None, None)
+    return nexus.ask(ctx)
 
 
 def _print_answer(question: str, nexus: NexusClient) -> None:

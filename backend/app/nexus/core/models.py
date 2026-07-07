@@ -233,6 +233,7 @@ class ExecContext:
         self.question = question
         self.as_user = as_user
         self.ontology_id = ontology_id
+        self.requested_ontology_id: Optional[str] = None  # 用户显式指定的本体（None=交初始化器 LLM 路由）
         self.llm_name: Optional[str] = None       # 本次运行选中的规划 LLM（None=用默认）
         self.cancellation_token = cancellation_token
         self.started_at = time.time()

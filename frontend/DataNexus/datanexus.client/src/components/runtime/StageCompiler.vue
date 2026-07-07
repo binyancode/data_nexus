@@ -1,5 +1,5 @@
 <template>
-  <StageShell :seq="1" title="编译器" subtitle="自然语言 → 语义查询图 (SQG)" :state="stage?.state" :cost="stage?.cost_ms ?? null">
+  <StageShell :seq="2" title="编译器" subtitle="自然语言 → 语义查询图 (SQG)" :state="stage?.state" :cost="stage?.cost_ms ?? null">
     <div class="flow">
       <div class="col in-col">
         <div class="col-h">输入 · 问题</div>

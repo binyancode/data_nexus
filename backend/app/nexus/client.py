@@ -1,4 +1,4 @@
-"""NexusClient：装配本体 + 注册表 + 四段引擎，暴露 ask() 唯一入口。"""
+"""NexusClient：装配本体 + 注册表 + 五段引擎，暴露 ask() 唯一入口。"""
 
 from __future__ import annotations
 
@@ -13,10 +13,8 @@ from utils.logger import get_logger
 
 from nexus.core.models import Answer, ExecContext
 from nexus.ontology.repository import OntologyRepository
-from nexus.ontology.json_ontology import JsonOntology
-from nexus.ontology.router import OntologyRouter
-from nexus.ontology.validator import validate_ontology, ontology_resolver_names
 from nexus.registry import ResolverRegistry
+from nexus.engine.initializer import Initializer
 from nexus.engine.compiler import Compiler
 from nexus.engine.optimizer import Optimizer
 from nexus.engine.coordinator import Coordinator
@@ -43,81 +41,47 @@ class NexusClient:
 
         self.repo = OntologyRepository(self._schema)
         self.registry = ResolverRegistry(onto_conf).load()
-        self.router = OntologyRouter(self.registry.llm())
+        self.initializer = Initializer(self.repo, self.registry)
         self.coordinator = Coordinator(self.registry)
         self.generator = Generator()
-
-    # 选一份对 as_user 可见的本体（显式指定优先，否则 LLM 自动路由）
-    def _select_ontology(self, question: str, as_user: Optional[str], ontology_id: Optional[str], llm=None):
-        if ontology_id:
-            onto = self.repo.get(ontology_id)
-            if onto and self.repo.can_read(onto, as_user):
-                return onto
-            return None
-        visible = self.repo.list_for_user(as_user)
-        picked = self.router.pick(question, visible, llm=llm)
-        return self.repo.get(picked) if picked else None
 
     def start_ask(self, question: str, as_user: Optional[str] = None,
                   ontology_id: Optional[str] = None, run_id: Optional[str] = None,
                   llm_name: Optional[str] = None) -> str:
-        """同步建 run 并返回 run_id，随后在后台线程执行四段引擎。
+        """同步建 run 并返回 run_id，随后后台线程执行五段引擎：
+        初始化器 → 编译器 → 优化器 → 协调器 → 生成器。
 
-        使用本体前先做**预检查**（validate_ontology）：本体不可用（如未配置任何 resolver）
-        则直接抛 ValueError，由接口层报错给前端，不创建 run、不起线程。
+        本体选择（显式指定 or LLM 路由）+ 校验都在「初始化器」段内完成并完整落库；
+        选不到/无效本体表现为失败的初始化器段（可查错因），不再做 run 前预检。
 
-        关键：start_run 在返回前完成落库，避免前端拿到 run_id 立即轮询 runs/{id} 时出现
-        「Run not found」的时间窗。llm_name 为本次运行选中的规划 LLM（None=用默认）。
+        start_run 在返回前完成落库，避免前端拿到 run_id 立即轮询时的「Run not found」时间窗。
         """
         ctx = ExecContext(question, as_user, run_id=run_id)
         ctx.llm_name = llm_name
-        llm = self.registry.llm(llm_name)
-        onto = self._select_ontology(question, as_user, ontology_id, llm=llm)
-
-        # ── 预检查：本体不可用则直接拒绝 ──
-        if onto is None:
-            raise ValueError("找不到可用（或有权访问）的本体。")
-        problems = validate_ontology(onto, self.registry)
-        if problems:
-            raise ValueError("；".join(problems))
-
-        ctx.ontology_id = onto.ontology_id
-
+        ctx.requested_ontology_id = ontology_id
         ctx.recorder = get_run_recorder()
-        ctx.recorder.start_run(ctx.run_id, question, as_user, ctx.ontology_id)
-
-        threading.Thread(target=self.ask, args=(ctx, onto), daemon=True).start()
+        ctx.recorder.start_run(ctx.run_id, question, as_user, ontology_id)
+        threading.Thread(target=self.ask, args=(ctx,), daemon=True).start()
         return ctx.run_id
 
-    def ask(self, ctx: ExecContext, onto) -> Answer:
+    def ask(self, ctx: ExecContext) -> Answer:
         question = ctx.question
         rec = ctx.recorder
-
-        if onto is None:
-            rec.finish_run(ctx.run_id, "failed", None, ctx.cost_ms)
-            return Answer(run_id=ctx.run_id, question=question,
-                          text="找不到可用（或有权访问）的本体。", status="error")
-
-        # 按选中的本体临时装配 compiler/optimizer（引擎无状态、构造廉价）
-        scoped = JsonOntology(onto.graph, ns=onto.ontology_id)
-        # 本体作用域：允许使用的 resolver 名集合 + 可用算子集（所挂 resolver 的能力并集）
-        allowed = ontology_resolver_names(onto.graph)
-        available_ops: set[str] = set()
-        for n in allowed:
-            r = self.registry.resolver(n)
-            if r:
-                available_ops |= set(getattr(r, "operators", set()))
-        compiler = Compiler(scoped, self.registry.llm(ctx.llm_name), available_ops)
-        optimizer = Optimizer(scoped, self.registry, allowed)
-
         run_state, answer = "done", None
         try:
+            scope = self._stage(ctx, "initializer",
+                                lambda: self.initializer.run(ctx),
+                                _dumps({"question": question,
+                                        "requested_ontology_id": ctx.requested_ontology_id}),
+                                lambda s: _dumps({"ontology_id": s.ontology_id, "name": s.name,
+                                                  "selection": ctx.stage_logs.get("selection")}))
             sqg = self._stage(ctx, "compiler",
-                              lambda: compiler.compile(question, ctx),
+                              lambda: Compiler(scope.ontology, self.registry.llm(ctx.llm_name),
+                                               scope.available_ops).compile(question, ctx),
                               _dumps({"question": question, "ontology_id": ctx.ontology_id}),
                               lambda r: r.model_dump_json())
             plan = self._stage(ctx, "optimizer",
-                               lambda: optimizer.plan(sqg, ctx),
+                               lambda: Optimizer(scope.ontology, self.registry, scope.allowed).plan(sqg, ctx),
                                sqg.model_dump_json(),
                                lambda r: r.model_dump_json())        # ← 前端画 flow 的结构来源
             self._stage(ctx, "coordinator",

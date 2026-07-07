@@ -1,5 +1,5 @@
 <template>
-  <StageShell :seq="2" title="优化器" subtitle="语义图 → 物理执行计划（选源 · 生成调用 · 分波）" :state="stage?.state" :cost="stage?.cost_ms ?? null">
+  <StageShell :seq="3" title="优化器" subtitle="语义图 → 物理执行计划（选源 · 生成调用 · 分波）" :state="stage?.state" :cost="stage?.cost_ms ?? null">
     <div class="sum">
       <span class="pill">{{ planNodes.length }} 节点</span>
       <span class="pill">{{ maxWave }} 波并行</span>

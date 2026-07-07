@@ -47,7 +47,7 @@ class ApiLogRecorder(ApiLogSink):
 
 
 # stage → seq（四个引擎的固定顺序）
-_STAGE_SEQ = {"compiler": 1, "optimizer": 2, "coordinator": 3, "generator": 4}
+_STAGE_SEQ = {"initializer": 1, "compiler": 2, "optimizer": 3, "coordinator": 4, "generator": 5}
 
 
 class DbRunRecorder(RunRecorder):
@@ -82,6 +82,12 @@ class DbRunRecorder(RunRecorder):
                   SET [state] = ?, answer = ?, cost_ms = ?, updated_at = SYSUTCDATETIME()
                 WHERE run_id = ?""",
             (state, answer, cost_ms, run_id),
+        )
+
+    def set_run_ontology(self, run_id, ontology_id):
+        self._exec(
+            "UPDATE nexus.run SET ontology_id = ?, updated_at = SYSUTCDATETIME() WHERE run_id = ?",
+            (ontology_id, run_id),
         )
 
     # ── stage ──

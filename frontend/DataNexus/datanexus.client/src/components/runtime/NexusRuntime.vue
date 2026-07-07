@@ -42,7 +42,20 @@
 
       <!-- 详情区（随选中项 / 自动跟随运行阶段） -->
       <div class="detail">
-        <StageCompiler v-if="selected === 'compiler'" :stage="stageOf('compiler')" />
+        <StageInitializer v-if="selected === 'initializer'" :stage="stageOf('initializer')" />
+
+        <div v-else-if="selected === 'context'" class="ho-panel">
+          <div class="d-title">交接物 · 本体<span>初始化器 → 编译器 · 本次选定的本体</span></div>
+          <div v-if="pickedOntology" class="res-list">
+            <div class="res-row">
+              <span class="res-name">{{ pickedOntology.name || pickedOntology.ontology_id }}</span>
+              <span class="res-src">{{ pickedOntology.ontology_id }}</span>
+            </div>
+          </div>
+          <div v-else class="res-empty">尚未选定</div>
+        </div>
+
+        <StageCompiler v-else-if="selected === 'compiler'" :stage="stageOf('compiler')" />
 
         <div v-else-if="selected === 'sqg'" class="ho-panel">
           <div class="d-title">交接物 · 语义查询图（SQG）<span>编译器 → 优化器 · 点击节点看详情</span></div>
@@ -90,6 +103,7 @@ import StageCompiler from './StageCompiler.vue'
 import StageOptimizer from './StageOptimizer.vue'
 import StageCoordinator from './StageCoordinator.vue'
 import StageGenerator from './StageGenerator.vue'
+import StageInitializer from './StageInitializer.vue'
 import SqgDag from './SqgDag.vue'
 import CoordinatorDag from './CoordinatorDag.vue'
 
@@ -99,7 +113,7 @@ const emit = defineEmits<{ (e: 'done', answer: RuntimeAnswer): void }>()
 const detail = ref<RunDetail | null>(null)
 const error = ref('')
 const polling = ref(false)
-const selected = ref<string>('compiler')
+const selected = ref<string>('initializer')
 const autoFollow = ref(true)
 let timer: ReturnType<typeof setTimeout> | null = null
 let tries = 0
@@ -118,6 +132,11 @@ const ontologyLabel = computed(() => {
   return ontoNames.value[id] || id
 })
 
+// 初始化器交接物「本体」：本次选定的本体（读初始化器段 output）
+const pickedOntology = computed(() =>
+  safeParse<{ ontology_id: string; name?: string }>(stageOf('initializer')?.output),
+)
+
 // run id：太长 → 显示短前缀，点击复制完整 id，hover 看全量
 const shortRunId = computed(() => (detail.value?.run?.run_id || '').slice(0, 8))
 const copied = ref(false)
@@ -134,12 +153,14 @@ async function copyRunId() {
 }
 
 const segments = [
+  { id: 'initializer', name: '初始化器' },
   { id: 'compiler', name: '编译器' },
   { id: 'optimizer', name: '优化器' },
   { id: 'coordinator', name: '协调器' },
   { id: 'generator', name: '生成器' },
 ]
 const handoffs: ({ id: string; label: string } | null)[] = [
+  { id: 'context', label: '本体' },
   { id: 'sqg', label: 'SQG' },
   { id: 'exec', label: '执行计划' },
   { id: 'result', label: '结果' },
@@ -153,8 +174,7 @@ function stateLabel(s?: string | null) {
 }
 function stageOf(name: string) {
   return detail.value?.stages?.find((s) => s.stage === name) ?? null
-}
-function stOf(name: string) {
+}function stOf(name: string) {
   return stageOf(name)?.state ?? 'pending'
 }
 function metaOf(name: string) {

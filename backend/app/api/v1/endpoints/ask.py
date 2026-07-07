@@ -24,7 +24,7 @@ async def ask(request: Request, nexus: NexusClient = None):
     ontology_id = body.get("ontology_id")   # 显式指定；缺省则由 LLM 自动路由
     llm_name = body.get("llm_name")         # 本次运行选中的规划 LLM；缺省用默认
 
-    # start_ask 内部先做本体预检查（不通过→抛 ValueError），通过后同步建 run 再起后台线程
+    # start_ask 同步建 run 后返回 run_id；本体选择/校验在后台的「初始化器」段完成（选不到→失败段，前端轮询可见）
     try:
         run_id = nexus.start_ask(question=question, as_user=as_user,
                                  ontology_id=ontology_id, llm_name=llm_name)

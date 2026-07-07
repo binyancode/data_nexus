@@ -31,7 +31,7 @@
 
 **第三部分 · 前端设计**：30 前端设计（待补）
 
-**第四部分 · as-built 实现细化（2026-07）**：31 本体数据模型（role/dtype/additivity、graph JSON、刷新）· 32 AGGREGATE 增强（临时聚合/filter op/TopN/HAVING/可加性）· 33 Resolver 能力与本体作用域 · 34 规划 LLM 按 run 选择 · 35 凭据/LLM/源 管理 · 36 运行入口与工程细节 · 37 取数下沉：QuerySpec + 方言 · 38 CSV 源 + 本地文件凭据(DuckDB) · 39 日期区间过滤 / value_format / 属性描述 · 40 聚合融合优化（合并执行 + 拆分）· 41 自定义日志(logs)
+**第四部分 · as-built 实现细化（2026-07）**：31 本体数据模型（role/dtype/additivity、graph JSON、刷新）· 32 AGGREGATE 增强（临时聚合/filter op/TopN/HAVING/可加性）· 33 Resolver 能力与本体作用域 · 34 规划 LLM 按 run 选择 · 35 凭据/LLM/源 管理 · 36 运行入口与工程细节 · 37 取数下沉：QuerySpec + 方言 · 38 CSV 源 + 本地文件凭据(DuckDB) · 39 日期区间过滤 / value_format / 属性描述 · 40 聚合融合优化（合并执行 + 拆分）· 41 自定义日志(logs) · 42 本体命名空间（多本体 id 前缀）
 
 ---
 
@@ -1419,4 +1419,30 @@ FROM sales            -- 表只读一遍
 - **取数节点**：resolver 返回行数 → `run_node.logs` `{row_count}`（非 ASK/ACT）。
 
 机制：`ExecContext.stage_logs` 每段前清空、段末序列化写 `finish_stage`；`NodeResult.logs` 由 resolver 填、协调器写 `finish_node`。空则不落列（NULL）。
+
+## 42. 本体命名空间（多本体 id 前缀，as-built）
+
+**目标**：为「一次 run 参考多个本体」打底。多本体并存时，不同本体可能有**同名 concept id**（如两本体都有 `metric.gross_margin`），必须消歧。做法：编译期给每个 concept id 加**本体前缀** `本体id::concept.id`（分隔符 `::`），让 id 全局唯一、**本体信息随 id 流动**——算子里的属性 id 自带出处，优化器/协调器无需额外的 `ontology_id` 参数即可按正确本体解析（取指标表达式、取绑定、选 resolver）。
+
+### 42.1 为什么是「id 前缀」而非「节点加字段」
+- 全管线把 concept id 当**不透明字符串**传递（kind 来自 `Concept.kind` 对象，不从 id 前缀推断）。只要 id 全局唯一，大部分代码**零改**。
+- 「某节点属于哪个本体」变成**可派生**（取 id 前缀），无需在 SQGNode/PlanNode 上单独挂字段。
+- 天然不变量：**取数算子必然单本体**（跨本体无 relation → 无法 JOIN）；ASK/ACT 本体无关（只消费上游值）。跨本体综合发生在 ASK 层。
+
+### 42.2 注入点唯一：`JsonOntology(graph, ns=ontology_id)`
+命名空间只在构造 scoped 本体处发生（`client.ask`）。`ns` 非空时 `_build` 摊平 graph 的同时**深度前缀**：
+- **前缀**：entity/attribute/relation/metric/derivation/action 的 id、attribute 的 `attrs["entity"]` 反向引用、relation 的 `from_entity/to_entity`、**metric `expr` 内嵌的 `attribute.*` token**（`_pexpr` 正则重写）。
+- **不前缀**（物理名）：列名、表名、relation 的 `from_key/to_key`、resolver 名。
+- `ns=None`（单本体/测试）= 完全等于旧行为，**向后兼容**。`ns` 先 `re.sub` 清洗成 `[A-Za-z0-9_]`。
+
+### 42.3 token 正则放宽（前缀可选）
+编译器与优化器各有一处 `_ATTR_TOKEN`，改为 `(?:[A-Za-z0-9_]+::)?attribute(?:\.[A-Za-z0-9_]+)+`——命名空间 id 与裸 id 都匹配。编译器目录/提示词**自动**带前缀（catalog 来自 `list_concepts()`），示例是占位符不受影响。
+
+### 42.4 白拿的护栏
+跨本体无 relation → 若 LLM 误把两本体实体塞进同一聚合，§(关系连通性校验) 判定不连通 → **编译期报错**，天然禁止跨本体误聚合。
+
+### 42.5 验证与边界
+- 单本体端到端结果**逐位不变**（纯管线铺设）；metric expr 重写为 `SUM(onto_x::attribute.order.amount) - …`，优化器仍正确解析到物理列、关系仍成 JOIN。
+- **未做（后续）**：resolver 名是**另一个命名空间**，本步未动——两本体都叫 `dwh` 的 resolver 仍会在执行期撞，留作下一步（resolver 名/registry 按本体寻址）+ router 从「选 1」改「选一组」。
+- `ctx.ontology_id` 逻辑上不再是解析权威（本就不是），保留作审计/展示字段，多本体时再改成 set。
 

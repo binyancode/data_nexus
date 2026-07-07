@@ -1,5 +1,5 @@
 <template>
-  <StageShell :seq="4" title="生成器" subtitle="合并结果 → 自然语言答案 + 血缘" :state="stage?.state" :cost="stage?.cost_ms ?? null">
+  <StageShell :seq="5" title="生成器" subtitle="合并结果 → 自然语言答案 + 血缘" :state="stage?.state" :cost="stage?.cost_ms ?? null">
     <div v-if="answerText" class="answer">
       <el-icon class="a-icon"><Opportunity /></el-icon>
       <span>{{ answerText }}</span>
