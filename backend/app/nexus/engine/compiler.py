@@ -11,11 +11,15 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 from nexus.core.models import SQG, SQGNode, Operator, ConceptKind, ExecContext
+from nexus.engine.relations import connected
 
 _ALLOWED_OPS = {"AGGREGATE", "ASK", "ACT", "SELECT", "FILTER", "JOIN"}
+# 指标口径表达式里引用属性概念的记号，如 attribute.sales.amount
+_ATTR_TOKEN = re.compile(r"attribute(?:\.[A-Za-z0-9_]+)+")
 
 
 class Compiler:
@@ -200,8 +204,48 @@ class Compiler:
                 params=params,
                 depends_on=depends_on,
             ))
+        # 关系连通性校验：聚合若跨多个实体，这些实体必须能靠 relation 连成一张图
+        # （支持**间接关系**：中间可经桥接/维表中转）；否则无法生成合法的联合(join)
+        # 算子 —— 在编译期就提前报错，不留给优化器。
+        for n in nodes:
+            if n.operator != Operator.AGGREGATE:
+                continue
+            ents = self._agg_entities(n)
+            if len(ents) > 1 and not connected(self.ontology, ents):
+                names = "、".join(self._entity_name(e) for e in sorted(ents))
+                return SQG(question=question, nodes=[], context={"error": (
+                    f"「{n.name}」涉及的实体（{names}）之间缺少关系(relation)，"
+                    f"无法连接取数。请先在本体画布上连上对应的外键关系。"
+                )})
         context = {"intent": data.get("intent") or "auto", "generated_by": "llm"}
         return SQG(question=question, nodes=nodes, context=context)
+
+    # ── 聚合节点涉及的实体集合（指标口径 + measure + group_by + filters）──
+    def _agg_entities(self, node: SQGNode) -> set:
+        ents: set[str] = set()
+
+        def add(aid: Optional[str]) -> None:
+            if not aid:
+                return
+            c = self.ontology.get_concept(aid)
+            ent = (c.attrs or {}).get("entity") if c else None
+            if ent:
+                ents.add(ent)
+
+        if node.concept:
+            c = self.ontology.get_concept(node.concept)
+            if c and c.kind == ConceptKind.metric:
+                for tid in _ATTR_TOKEN.findall((c.attrs or {}).get("expr", "") or ""):
+                    add(tid)
+        add(node.params.get("measure"))
+        add(node.params.get("group_by"))
+        for f in node.params.get("filters", []) or []:
+            add(f.get("concept"))
+        return ents
+
+    def _entity_name(self, entity_id: str) -> str:
+        c = self.ontology.get_concept(entity_id)
+        return c.name if (c and c.name) else entity_id
 
     def _clean_filters(self, filters) -> list[dict]:
         """只保留指向真实属性 concept 的过滤，保留操作符 op（默认 =）。不做角色映射/跨实体改写。"""

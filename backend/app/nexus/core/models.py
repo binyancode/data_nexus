@@ -239,6 +239,7 @@ class ExecContext:
         self.results: dict[str, NodeResult] = {}   # node_id -> NodeResult
         self.context: dict[str, Any] = {}          # 引擎间交接包（携 plan.context）
         self.stage_logs: dict[str, Any] = {}        # 当前 stage 的自定义日志（JSON），每段前清空
+        self.compute: Any = None                    # 跨源内存计算引擎（ComputeEngine），协调器按需创建
         self.recorder: RunRecorder = NullRunRecorder()  # 运行记录器（由 client 注入）
 
     @property

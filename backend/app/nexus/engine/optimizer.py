@@ -18,6 +18,7 @@ from nexus.core.models import (
     QuerySpec, QueryJoin, QueryFilter, QueryHaving, QuerySelect,
 )
 from nexus.ontology.store import OntologyStore
+from nexus.engine.relations import join_tree
 
 # 表达式里引用属性概念的记号，如 attribute.sales.amount
 _ATTR_TOKEN = re.compile(r"attribute(?:\.[A-Za-z0-9_]+)+")
@@ -48,12 +49,16 @@ class Optimizer:
                      if n.operator == Operator.AGGREGATE and not n.depends_on}
         resolved = []                       # [(sqgnode, spec, resolver)]
         for n in sqg.nodes:
-            if n.id in first_ids:
-                ok, reason = self._agg_spec(n)
-                if ok:
-                    resolved.append((n, ok[0], ok[1]))
-                else:                       # 无法规划 → 失败节点（不静默丢弃）
-                    nodes.append(self._failed_agg(n.id, n.name, list(n.depends_on), reason))
+            if n.id not in first_ids:
+                continue
+            if self._is_cross_source(n):            # 跨源：分解成 fetch + join + 聚合
+                nodes += self._plan_cross_source(n, sqg, ctx)
+                continue
+            ok, reason = self._agg_spec(n)
+            if ok:
+                resolved.append((n, ok[0], ok[1]))
+            else:                           # 无法规划 → 失败节点（不静默丢弃）
+                nodes.append(self._failed_agg(n.id, n.name, list(n.depends_on), reason))
         nodes += self._fuse_aggregates(resolved, sqg, ctx)
 
         for n in sqg.nodes:
@@ -102,6 +107,206 @@ class Optimizer:
             call={"node_id": node_id, "error": reason or "无法生成取数计划"},
             depends_on=depends_on,
         )
+
+    # ── 跨源：检测 + 分解（各源单独 fetch → 计算引擎里 join → 原聚合算子在合并结果上跑）──
+    def _referenced_entities(self, node) -> list:
+        """本聚合直接引用到的实体（measure/group_by/filters 里出现的属性所属实体），保序。"""
+        expr = self._aggregate_expr(node)
+        if not expr:
+            return []
+        ids = list(_ATTR_TOKEN.findall(expr))
+        if node.params.get("group_by"):
+            ids.append(node.params["group_by"])
+        for f in node.params.get("filters", []) or []:
+            if f.get("concept"):
+                ids.append(f["concept"])
+        out: list = []
+        for tid in ids:
+            c = self.ontology.get_concept(tid)
+            ent = c.attrs.get("entity") if c else None
+            if ent and ent not in out:
+                out.append(ent)
+        return out
+
+    def _is_cross_source(self, node) -> bool:
+        """跨源判定：把被引用实体用关系图连通（含中间表），只要连接链上任一实体
+        与其它实体不同源，即按跨源处理。"""
+        ents = self._referenced_entities(node)
+        if len(ents) <= 1:
+            return False
+        tree = join_tree(self.ontology, ents)
+        if tree is None:
+            return False                    # 连不通 → 交给下游产失败节点（不在此拦）
+        ordered, _ = tree
+        resolvers = {self._entity_binding(e)[1] for e in ordered}
+        resolvers.discard(None)
+        return len(resolvers) > 1
+
+    @staticmethod
+    def _local(entity_id: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_]", "_", entity_id.split(".")[-1]) or "e"
+
+    def _galias(self, entity_id: str, col: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_]", "_", f"{self._local(entity_id)}__{col}")
+
+    def _plan_cross_source(self, node, sqg: SQG, ctx: Optional[ExecContext] = None) -> list:
+        """跨源聚合分解：每源一个 FETCH（下推自己的过滤、列名加实体前缀去重）→ 一个
+        JOIN 节点在计算引擎里合并 → 原聚合节点(id=node.id)在合并结果上做 group/agg/having/top。"""
+        def fail(reason):
+            return [self._failed_agg(node.id, node.name, list(node.depends_on), reason)]
+
+        expr = self._aggregate_expr(node)
+        if not expr:
+            return fail("无法确定聚合口径")
+        filters = node.params.get("filters", []) or []
+        group_by = node.params.get("group_by")
+        order = (node.params.get("order") or "desc").lower()
+        order = "ASC" if order == "asc" else "DESC"
+        try:
+            limit = int(node.params.get("limit")) if node.params.get("limit") is not None else None
+        except (TypeError, ValueError):
+            limit = None
+        having = self._clean_having(node.params.get("having"))
+
+        # 解析 measure 里的属性 token → (entity, col)
+        tokens = list(dict.fromkeys(_ATTR_TOKEN.findall(expr)))
+        info: dict[str, tuple[str, str]] = {}
+        ent_order: list[str] = []
+        for tid in tokens:
+            c = self.ontology.get_concept(tid)
+            col = self._attr_column(tid)
+            ent = c.attrs.get("entity") if c else None
+            if not (c and col and ent):
+                return fail(f"属性未解析/未绑定列：{tid}")
+            info[tid] = (ent, col)
+            if ent not in ent_order:
+                ent_order.append(ent)
+
+        group_ent = group_col = None
+        if group_by:
+            gc = self.ontology.get_concept(group_by)
+            group_col = self._attr_column(group_by)
+            group_ent = gc.attrs.get("entity") if gc else None
+            if not (gc and group_col and group_ent):
+                return fail(f"分组维度未解析/未绑定列：{group_by}")
+            if group_ent not in ent_order:
+                ent_order.append(group_ent)
+
+        # 过滤按所属实体归类（各自下推）
+        filt_by_ent: dict[str, list] = {}
+        for f in filters:
+            cid = f.get("concept")
+            col = self._attr_column(cid)
+            c = self.ontology.get_concept(cid) if cid else None
+            fent = c.attrs.get("entity") if c else None
+            if not (col and fent):
+                continue
+            if fent not in ent_order:
+                ent_order.append(fent)
+            op = _FILTER_OPS.get((f.get("op") or "=").lower(), "=")
+            filt_by_ent.setdefault(fent, []).append(
+                QueryFilter(col=col, op=op, value=f.get("value"), value_format=f.get("value_format")))
+
+        # 用关系图把被引用实体连通（含中间表）：ent_order 扩为整条链，edges 为连接树
+        tree = join_tree(self.ontology, ent_order)
+        if tree is None:
+            return fail("跨源聚合缺少关系(relation)：被引用的实体之间没有任何通路。请在本体连上外键关系。")
+        ent_order, edges = tree
+
+        # 实体 → (表, resolver)
+        meta: dict[str, dict] = {}
+        for ent in ent_order:
+            table, rsv = self._entity_binding(ent)
+            if not table:
+                return fail(f"实体未绑定物理表：{ent}")
+            if not self._allowed(rsv):
+                return fail(f"数据源不在本体允许集：{rsv}")
+            meta[ent] = {"table": table, "resolver": rsv}
+
+        # 每实体需要取的列 = 被引用列 + join 键（中间表通常只取 join 键）
+        needed = {e: set() for e in ent_order}
+        for _, (e, col) in info.items():
+            needed[e].add(col)
+        if group_ent:
+            needed[group_ent].add(group_col)
+        for e, flist in filt_by_ent.items():
+            for qf in flist:
+                needed[e].add(qf.col)
+        for (fe, fk, te, tk) in edges:
+            needed[fe].add(fk)
+            needed[te].add(tk)
+
+        # FETCH 节点（各源下推过滤，列名加实体前缀去重）；表名=fetch 节点 id
+        out_nodes: list = []
+        fetch_id: dict[str, str] = {}
+        for i, ent in enumerate(ent_order):
+            rsv = meta[ent]["resolver"]
+            robj = self.registry.resolver(rsv) if self.registry else None
+            if robj is None:
+                return fail(f"resolver 缺失：{rsv}")
+            selects = [QuerySelect(alias=self._galias(ent, col), expr=col)
+                       for col in sorted(needed[ent])]
+            fspec = QuerySpec(from_table=meta[ent]["table"], selects=selects,
+                              filters=filt_by_ent.get(ent, []))
+            fid = self._unique_id(f"f_{node.id}_{i}", sqg)
+            call = robj.compile(fspec)
+            call["node_id"] = fid
+            fetch_id[ent] = fid
+            self._log_node(ctx, fid, fspec, call)
+            out_nodes.append(PlanNode(id=fid, operator=Operator.SELECT,
+                                      name=f"取数·{self._local(ent)}", resolver=rsv,
+                                      call=call, depends_on=[]))
+
+        # JOIN 节点（计算引擎）：各 fetch 结果物化后连接成一张统一表
+        alias_of = {ent_order[0]: "a0"}
+        jjoins = []
+        for k, (fe, fk, te, tk) in enumerate(edges, start=1):
+            new_ent = ent_order[k]
+            alias_of[new_ent] = f"a{k}"
+            jjoins.append(QueryJoin(
+                table=fetch_id[new_ent], alias=alias_of[new_ent],
+                on_left=f"{alias_of[fe]}.{self._galias(fe, fk)}",
+                on_right=f"{alias_of[te]}.{self._galias(te, tk)}",
+            ))
+        join_spec = QuerySpec(from_table=fetch_id[ent_order[0]], from_alias="a0", joins=jjoins)
+        join_tbl = self._unique_id(f"jt_{node.id}", sqg)
+        join_nid = self._unique_id(f"j_{node.id}", sqg)
+        join_call = {
+            "node_id": join_nid,
+            "loads": [{"table": fetch_id[e], "from_node": fetch_id[e]} for e in ent_order],
+            "spec": join_spec.model_dump(),
+            "into": join_tbl,
+        }
+        self._log_node(ctx, join_nid, join_spec, {k: v for k, v in join_call.items() if k != "node_id"})
+        out_nodes.append(PlanNode(id=join_nid, operator=Operator.JOIN, name="跨源连接",
+                                  resolver="(compute)", call=join_call,
+                                  depends_on=[fetch_id[e] for e in ent_order]))
+
+        # 最终聚合节点（id=逻辑 node.id，计算引擎）：在合并表上 group/agg/having/top
+        resolved_expr = expr
+        for tid in sorted(tokens, key=len, reverse=True):
+            ent, col = info[tid]
+            resolved_expr = resolved_expr.replace(tid, self._galias(ent, col))
+        agg_spec = QuerySpec(
+            from_table=join_tbl,
+            value_expr=resolved_expr,
+            label_expr=(self._galias(group_ent, group_col) if group_ent else None),
+            order=order,
+            limit=(limit if group_ent else None),
+            having=(QueryHaving(expr=resolved_expr, op=having["op"], value=having["value"]) if having else None),
+        )
+        agg_call = {"node_id": node.id, "spec": agg_spec.model_dump()}
+        self._log_node(ctx, node.id, agg_spec, {"spec": "compute"})
+        out_nodes.append(PlanNode(id=node.id, operator=Operator.AGGREGATE, name=node.name,
+                                  resolver="(compute)", call=agg_call, depends_on=[join_nid]))
+        return out_nodes
+
+    def _log_node(self, ctx, node_id, spec, call):
+        if ctx is not None:
+            ctx.stage_logs.setdefault("nodes", {})[node_id] = {
+                "query_spec": spec.model_dump(), "call": call,
+            }
+
 
     # 解析一个 AGGREGATE 节点 → ((QuerySpec, resolver) | None, reason)；不编译（供融合先分组）
     def _agg_spec(self, node):
@@ -352,6 +557,13 @@ class Optimizer:
             if fent and fent not in ent_order and self._attr_column(f.get("concept")):
                 ent_order.append(fent)
 
+        # 用关系图把被引用实体连通（含中间表）：ent_order 扩为整条链，tree_edges 为连接树
+        tree = join_tree(self.ontology, ent_order)
+        if tree is None:
+            return ("跨表聚合缺少关系(relation)：被引用的实体之间没有任何通路。"
+                    "请在本体画布上连上对应的外键关系。")
+        ent_order, tree_edges = tree
+
         # 实体 → 表/resolver/别名
         meta: dict[str, dict] = {}
         resolver = None
@@ -378,19 +590,14 @@ class Optimizer:
         from_alias = None if single else meta[first]["alias"]
         joins: list[QueryJoin] = []
         if not single:
-            joined = {first}
-            for ent in ent_order[1:]:
-                rel = self._find_relation(ent, joined)
-                if not rel:
-                    return (f"跨表聚合缺少关系(relation)：无法把「{ent}」关联进来。"
-                            f"请在本体画布上连上对应的外键关系。")
-                fe, fk, te, tk = rel
+            for k in range(1, len(ent_order)):
+                ent = ent_order[k]
+                fe, fk, te, tk = tree_edges[k - 1]
                 joins.append(QueryJoin(
                     table=meta[ent]["table"], alias=meta[ent]["alias"],
                     on_left=f'{meta[fe]["alias"]}.{fk}',
                     on_right=f'{meta[te]["alias"]}.{tk}',
                 ))
-                joined.add(ent)
 
         filter_specs = self._build_where(filters, meta, single)
 
@@ -443,20 +650,6 @@ class Optimizer:
                 out.append(QueryFilter(col=col, op=op, value=value,
                                        value_format=f.get("value_format")))
         return out
-
-    # 找一条把 ent 连到已 join 实体的关系
-    def _find_relation(self, ent: str, joined: set):
-        for c in self.ontology.list_concepts():
-            kind = c.kind.value if hasattr(c.kind, "value") else str(c.kind)
-            if kind != "relation":
-                continue
-            fe = c.attrs.get("from_entity"); te = c.attrs.get("to_entity")
-            fk = c.attrs.get("from_key"); tk = c.attrs.get("to_key")
-            if not (fe and te and fk and tk):
-                continue
-            if (fe == ent and te in joined) or (te == ent and fe in joined):
-                return fe, fk, te, tk
-        return None
 
     # ── ASK → agent(LLM) ──
     def _plan_ask(self, node) -> Optional[PlanNode]:

@@ -3,6 +3,13 @@
     <div class="rt-topline">
       <span class="rt-dot" :style="runtimeDotStyle(runState)"></span>
       <span class="rt-q">{{ detail?.run?.question || question || '—' }}</span>
+      <span v-if="ontologyLabel" class="rt-meta" title="本体">📚 {{ ontologyLabel }}</span>
+      <span
+        v-if="detail?.run?.run_id"
+        class="rt-meta rt-runid"
+        :title="copied ? '已复制' : ('点击复制 run id：' + detail?.run?.run_id)"
+        @click="copyRunId"
+      >{{ copied ? '✓ 已复制' : ('#' + shortRunId) }}</span>
       <span class="rt-state">{{ stateLabel(runState) }}</span>
       <span class="rt-cost" v-if="detail?.run?.cost_ms">{{ detail?.run?.cost_ms }} ms</span>
       <span v-if="polling" class="rt-spin" title="实时更新中"></span>
@@ -77,6 +84,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { getRun, type RunDetail, type RunNode } from '../../bff/Runs'
+import { listOntologies, type OntologyMeta } from '../../bff/Ontology'
 import { stateColor, safeParse, type RuntimeAnswer } from './dag'
 import StageCompiler from './StageCompiler.vue'
 import StageOptimizer from './StageOptimizer.vue'
@@ -96,6 +104,34 @@ const autoFollow = ref(true)
 let timer: ReturnType<typeof setTimeout> | null = null
 let tries = 0
 let emitted = false
+
+// 本体 id → 名称映射（用于在标题栏显示选中的本体名，取不到则回退 id）
+const ontoNames = ref<Record<string, string>>({})
+listOntologies()
+  .then((list: OntologyMeta[]) => {
+    ontoNames.value = Object.fromEntries(list.map((o) => [o.ontologyId, o.name]))
+  })
+  .catch(() => {})
+const ontologyLabel = computed(() => {
+  const id = detail.value?.run?.ontology_id
+  if (!id) return ''
+  return ontoNames.value[id] || id
+})
+
+// run id：太长 → 显示短前缀，点击复制完整 id，hover 看全量
+const shortRunId = computed(() => (detail.value?.run?.run_id || '').slice(0, 8))
+const copied = ref(false)
+async function copyRunId() {
+  const id = detail.value?.run?.run_id
+  if (!id) return
+  try {
+    await navigator.clipboard.writeText(id)
+  } catch {
+    /* 剪贴板不可用时静默忽略 */
+  }
+  copied.value = true
+  setTimeout(() => (copied.value = false), 1200)
+}
 
 const segments = [
   { id: 'compiler', name: '编译器' },
@@ -272,6 +308,18 @@ onUnmounted(() => { if (timer) clearTimeout(timer) })
 }
 .rt-q { font-weight: 600; color: var(--tech-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: 0.02em; }
 .rt-state, .rt-cost { font-size: 12px; color: var(--tech-dim); font-variant-numeric: tabular-nums; }
+.rt-meta {
+  flex: 0 0 auto; font-size: 11.5px; color: var(--tech-dim);
+  background: transparent; border: 1px solid var(--tech-border);
+  border-radius: 6px; padding: 2px 8px; max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rt-runid {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer; transition: color 0.15s, border-color 0.15s;
+}
+.rt-runid:hover { color: var(--tech-text); border-color: var(--tech-cyan); }
 .rt-spin {
   width: 14px; height: 14px; border-radius: 50%;
   border: 2px solid rgba(120, 200, 230, 0.2); border-top-color: var(--tech-cyan);

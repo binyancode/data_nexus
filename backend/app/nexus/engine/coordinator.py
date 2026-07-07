@@ -16,7 +16,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from nexus.core.models import QueryPlan, PlanNode, NodeResult, ExecContext, Operator, topo_waves
+from nexus.core.models import QueryPlan, PlanNode, NodeResult, ExecContext, Operator, QuerySpec, topo_waves
 from nexus.registry import ResolverRegistry
 
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
@@ -43,10 +43,21 @@ class Coordinator:
     def execute(self, plan: QueryPlan, ctx: ExecContext) -> dict[str, NodeResult]:
         ctx.context = plan.context or {}
         parallelism = int(ctx.context.get("parallelism", 4) or 4)
-        for wave in self._waves(plan.nodes):
-            if self._cancelled(ctx):
-                break
-            self._run_wave(wave, ctx, parallelism)
+        # 跨源计算：若计划含 compute 节点，每运行建一个内存计算引擎
+        if any(getattr(n, "resolver", "") == "(compute)" for n in plan.nodes):
+            from nexus.engine.compute import DuckDbCompute
+            import threading
+            ctx.compute = DuckDbCompute()
+            ctx.compute.lock = threading.Lock()
+        try:
+            for wave in self._waves(plan.nodes):
+                if self._cancelled(ctx):
+                    break
+                self._run_wave(wave, ctx, parallelism)
+        finally:
+            if ctx.compute is not None:
+                ctx.compute.close()
+                ctx.compute = None
         return ctx.results
 
     # ── 分波 ──
@@ -86,6 +97,8 @@ class Coordinator:
         if isinstance(call, dict) and call.get("error"):
             # 优化器已判定无法规划（如缺少关系）：直接标失败，不去找 resolver
             res = NodeResult(node_id=node.id, resolver=node.resolver, error=str(call["error"]))
+        elif node.resolver == "(compute)":
+            res = self._compute(node, call, ctx)          # 跨源：内存计算引擎执行 JOIN / 聚合
         elif node.operator == Operator.PROJECT:
             res = self._project(node, call, ctx)          # 融合拆分：从合并节点取一列，不调 resolver
         elif not resolver:
@@ -111,6 +124,26 @@ class Coordinator:
             res.source, res.trust, res.error, int((time.time() - t0) * 1000),
             (_dumps(node_logs) if node_logs else None),
         )
+
+    # ── 跨源：内存计算引擎执行 JOIN / 聚合（load 上游 fetch 结果 → run QuerySpec）──
+    def _compute(self, node: PlanNode, call: dict, ctx: ExecContext) -> NodeResult:
+        eng = ctx.compute
+        if eng is None:
+            return NodeResult(node_id=node.id, resolver="(compute)", error="compute engine 未初始化")
+        try:
+            with eng.lock:
+                for ld in call.get("loads", []) or []:
+                    src = ctx.results.get(ld.get("from_node"))
+                    eng.load(ld["table"], (src.rows if src and src.rows else []))
+                spec = QuerySpec(**call["spec"])
+                rows = eng.run(spec, into=call.get("into"))
+        except Exception:
+            return NodeResult(node_id=node.id, resolver="(compute)",
+                              error=traceback.format_exc(), source="compute")
+        cols = list(rows[0].keys()) if rows else []
+        return NodeResult(node_id=node.id, resolver="(compute)", output=rows,
+                          columns=cols, rows=rows, source="compute",
+                          detail=call.get("into") or "join/aggregate")
 
     # ── 融合拆分：从合并节点结果里取一列，产出与单聚合等价的 NodeResult ──
     def _project(self, node: PlanNode, call: dict, ctx: ExecContext) -> NodeResult:
