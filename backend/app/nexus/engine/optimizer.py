@@ -49,9 +49,11 @@ class Optimizer:
         resolved = []                       # [(sqgnode, spec, resolver)]
         for n in sqg.nodes:
             if n.id in first_ids:
-                r = self._agg_spec(n)
-                if r is not None:
-                    resolved.append((n, r[0], r[1]))
+                ok, reason = self._agg_spec(n)
+                if ok:
+                    resolved.append((n, ok[0], ok[1]))
+                else:                       # 无法规划 → 失败节点（不静默丢弃）
+                    nodes.append(self._failed_agg(n.id, n.name, list(n.depends_on), reason))
         nodes += self._fuse_aggregates(resolved, sqg, ctx)
 
         for n in sqg.nodes:
@@ -86,18 +88,26 @@ class Optimizer:
 
     # ── AGGREGATE → 下推 SQL ──
     def _plan_aggregate(self, node, ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
-        r = self._agg_spec(node)
-        if r is None:
-            return None
-        spec, resolver = r
+        ok, reason = self._agg_spec(node)
+        if not ok:
+            return self._failed_agg(node.id, node.name, list(node.depends_on), reason)
+        spec, resolver = ok
         return self._compile_agg_node(node.id, node.name, spec, resolver,
                                       list(node.depends_on), ctx)
 
-    # 解析一个 AGGREGATE 节点 → (QuerySpec, resolver)；不编译、不建 PlanNode（供融合先分组）
+    # 失败节点：无法规划取数时产出一个带错因的节点（协调器会标红，不静默消失）
+    def _failed_agg(self, node_id, name, depends_on, reason) -> PlanNode:
+        return PlanNode(
+            id=node_id, operator=Operator.AGGREGATE, name=name, resolver="",
+            call={"node_id": node_id, "error": reason or "无法生成取数计划"},
+            depends_on=depends_on,
+        )
+
+    # 解析一个 AGGREGATE 节点 → ((QuerySpec, resolver) | None, reason)；不编译（供融合先分组）
     def _agg_spec(self, node):
         expr = self._aggregate_expr(node)
         if not expr:
-            return None
+            return None, "无法确定聚合口径（需要有效的指标或度量属性）"
         filters = node.params.get("filters", [])
         group_by = node.params.get("group_by")
         order = (node.params.get("order") or "desc").lower()
@@ -111,12 +121,14 @@ class Optimizer:
         rank = {"group_by": group_by, "order": order, "limit": limit, "having": having} \
             if (group_by or having) else None
         resolved = self._resolve_attr_aggregate(expr, filters, rank)
+        if isinstance(resolved, str):
+            return None, resolved                      # 具体原因（如缺少关系）
         if resolved is None:
-            return None
+            return None, "无法解析取数（检查属性绑定/度量类型）"
         spec, resolver = resolved
         if not self._allowed(resolver):
-            return None
-        return spec, resolver
+            return None, f"数据源不在本体允许集：{resolver}"
+        return (spec, resolver), None
 
     # QuerySpec + resolver → PlanNode（编译成 call + 落 logs）
     def _compile_agg_node(self, node_id, name, spec, resolver, depends_on,
@@ -309,7 +321,7 @@ class Optimizer:
     def _resolve_attr_aggregate(self, expr: str, filters: list, rank: Optional[dict] = None):
         tokens = list(dict.fromkeys(_ATTR_TOKEN.findall(expr)))
         if not tokens:
-            return None
+            return "聚合表达式里没有可解析的属性"
         info: dict[str, tuple[str, str]] = {}     # attr_id -> (entity_id, column)
         ent_order: list[str] = []
         for tid in tokens:
@@ -317,7 +329,7 @@ class Optimizer:
             col = self._attr_column(tid)
             ent = c.attrs.get("entity") if c else None
             if not (c and col and ent):
-                return None
+                return f"属性无法解析或未绑定物理列：{tid}"
             info[tid] = (ent, col)
             if ent not in ent_order:
                 ent_order.append(ent)
@@ -329,7 +341,7 @@ class Optimizer:
             group_col = self._attr_column(rank["group_by"])
             group_ent = gc.attrs.get("entity") if gc else None
             if not (gc and group_col and group_ent):
-                return None
+                return f"分组维度无法解析或未绑定列：{rank['group_by']}"
             if group_ent not in ent_order:
                 ent_order.append(group_ent)
 
@@ -346,7 +358,7 @@ class Optimizer:
         for i, ent in enumerate(ent_order):
             table, rsv = self._entity_binding(ent)
             if not table:
-                return None
+                return f"实体未绑定物理表：{ent}"
             resolver = resolver or rsv
             meta[ent] = {"table": table, "resolver": rsv, "alias": f"t{i}"}
         single = len(ent_order) == 1
@@ -370,7 +382,8 @@ class Optimizer:
             for ent in ent_order[1:]:
                 rel = self._find_relation(ent, joined)
                 if not rel:
-                    return None
+                    return (f"跨表聚合缺少关系(relation)：无法把「{ent}」关联进来。"
+                            f"请在本体画布上连上对应的外键关系。")
                 fe, fk, te, tk = rel
                 joins.append(QueryJoin(
                     table=meta[ent]["table"], alias=meta[ent]["alias"],

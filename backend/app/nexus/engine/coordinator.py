@@ -83,7 +83,10 @@ class Coordinator:
             return
 
         resolver = self.registry.resolver(node.resolver)
-        if node.operator == Operator.PROJECT:
+        if isinstance(call, dict) and call.get("error"):
+            # 优化器已判定无法规划（如缺少关系）：直接标失败，不去找 resolver
+            res = NodeResult(node_id=node.id, resolver=node.resolver, error=str(call["error"]))
+        elif node.operator == Operator.PROJECT:
             res = self._project(node, call, ctx)          # 融合拆分：从合并节点取一列，不调 resolver
         elif not resolver:
             res = NodeResult(node_id=node.id, resolver=node.resolver,
