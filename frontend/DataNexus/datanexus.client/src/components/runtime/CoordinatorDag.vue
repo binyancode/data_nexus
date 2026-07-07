@@ -92,6 +92,10 @@ function st(id: string): string {
 function stateLabel(s?: string | null): string {
   return { pending: '待执行', running: '执行中', done: '完成', failed: '失败', skipped: '跳过' }[s ?? 'pending'] ?? s ?? ''
 }
+// 耗时格式化：<1000ms 显示 ms，否则显示秒（1 位小数）
+function fmtCost(ms: number): string {
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+}
 
 const nodes = computed(() => {
   const ns = planNodes.value
@@ -109,6 +113,7 @@ const nodes = computed(() => {
     const tail = raw.length > 26 ? raw.slice(0, 26) + '…' : raw
     const isMerge = mergeIds.has(n.id)
     const isProject = n.operator === 'PROJECT'
+    const cost = rn?.cost_ms != null ? fmtCost(rn.cost_ms) : undefined
     return dagNode(
       n.id,
       over[n.id] ?? pos.get(n.id) ?? { x: 0, y: 0 },
@@ -117,6 +122,7 @@ const nodes = computed(() => {
         badge: isProject ? '拆分' : n.operator,
         value: tail,
         color: stateColor(s),
+        cost,
         selected: n.id === selectedId.value,
         fuseTag: isMerge ? '合并执行' : isProject ? '拆分' : undefined,
       },

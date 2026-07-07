@@ -127,7 +127,7 @@ export function operatorColor(op?: string | null): string {
 export function dagNode(
   id: string,
   pos: { x: number; y: number },
-  data: { name: string; badge?: string; value?: string; color: string; selected?: boolean; fuseTag?: string },
+  data: { name: string; badge?: string; value?: string; color: string; selected?: boolean; fuseTag?: string; cost?: string },
   extraClass = '',
 ): Node {
   return {

@@ -9,6 +9,7 @@ defineProps<{
     color: string
     selected?: boolean
     fuseTag?: string        // 优化标记（合并执行 / 拆分），高亮显示
+    cost?: string           // 该算子耗时（已格式化，如 16ms / 1.2s）
   }
 }>()
 </script>
@@ -24,6 +25,7 @@ defineProps<{
       <div class="row">
         <span v-if="data.badge" class="badge">{{ data.badge }}</span>
         <span v-if="data.value" class="val" :title="data.value">{{ data.value }}</span>
+        <span v-if="data.cost" class="cost" title="算子耗时">{{ data.cost }}</span>
       </div>
     </div>
     <Handle type="source" :position="Position.Right" class="dh" />
@@ -73,7 +75,13 @@ defineProps<{
 }
 .val {
   font-size: 11px; color: #546b82; font-variant-numeric: tabular-nums;
+  flex: 1 1 auto; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cost {
+  flex: 0 0 auto; margin-left: auto;
+  font-size: 10px; color: #7a8ba0; font-variant-numeric: tabular-nums;
+  background: #eef3f9; border-radius: 4px; padding: 0 5px; line-height: 15px;
 }
 .dh {
   width: 10px; height: 10px; min-width: 10px; min-height: 10px;
