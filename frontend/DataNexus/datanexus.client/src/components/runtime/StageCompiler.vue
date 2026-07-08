@@ -8,8 +8,11 @@
       </div>
       <div class="col-arrow">➜</div>
       <div class="col grow">
-        <div class="col-h">输出 · SQG（{{ sqgNodes.length }} 节点）</div>
-        <div v-if="sqgNodes.length" class="nodes">
+        <div class="col-h">输出 · SQG（{{ sqgNodes.length }} 节点）
+          <span v-if="recompiled" class="rc" :title="attemptsText">⟳ 重编译 {{ recompiled }} 次</span>
+        </div>
+        <div v-if="cerr" class="cerr">⚠ {{ cerr }}</div>
+        <div v-else-if="sqgNodes.length" class="nodes">
           <div v-for="n in sqgNodes" :key="n.id" class="node">
             <span class="op" :style="{ background: operatorColor(n.operator) }">{{ n.operator }}</span>
             <span class="nm">{{ n.name || n.id }}</span>
@@ -30,12 +33,18 @@ import { safeParse, operatorColor } from './dag'
 import type { RunStage } from '../../bff/Runs'
 
 interface SqgNode { id: string; operator: string; name?: string; concept?: string }
+type SqgCtx = { intent?: string; recompiled?: number; error?: string; attempts?: Array<{ error?: string; unanswerable?: string }> }
 const props = defineProps<{ stage: RunStage | null }>()
 
 const question = computed(() => safeParse<{ question?: string }>(props.stage?.input)?.question)
-const sqg = computed(() => safeParse<{ nodes?: SqgNode[]; context?: { intent?: string } }>(props.stage?.output))
+const sqg = computed(() => safeParse<{ nodes?: SqgNode[]; context?: SqgCtx }>(props.stage?.output))
 const sqgNodes = computed(() => sqg.value?.nodes ?? [])
 const intent = computed(() => sqg.value?.context?.intent)
+const recompiled = computed(() => sqg.value?.context?.recompiled ?? 0)
+const cerr = computed(() => sqg.value?.context?.error)
+const attemptsText = computed(() =>
+  (sqg.value?.context?.attempts ?? []).map((a) => a.error || a.unanswerable).filter(Boolean).join(' → '),
+)
 </script>
 
 <style scoped>
@@ -53,5 +62,7 @@ const intent = computed(() => sqg.value?.context?.intent)
 .nm { font-size: 13px; font-weight: 600; color: var(--tech-text); }
 .cc { margin-left: auto; font-size: 11px; color: var(--tech-cyan-dim); font-family: 'Cascadia Code', Consolas, monospace; }
 .muted { color: var(--tech-dim); }
+.rc { margin-left: 8px; font-size: 10px; font-weight: 600; color: #7c5cff; border: 1px solid #cabcff; background: #f2eeff; border-radius: 5px; padding: 1px 6px; cursor: help; }
+.cerr { color: #b23; background: #fff2f0; border: 1px solid #ffd0c8; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; white-space: pre-wrap; }
 .err { margin-top: 8px; color: #ffd5d0; white-space: pre-wrap; font-size: 12px; }
 </style>

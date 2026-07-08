@@ -20,6 +20,8 @@ from nexus.engine.relations import connected
 _ALLOWED_OPS = {"AGGREGATE", "ASK", "ACT", "SELECT", "FILTER", "JOIN"}
 # 指标口径表达式里引用属性概念的记号，如 attribute.sales.amount（可带本体命名空间前缀 onto_x::）
 _ATTR_TOKEN = re.compile(r"(?:[A-Za-z0-9_]+::)?attribute(?:\.[A-Za-z0-9_]+)+")
+# 编译自校验失败时最多重编次数（1 次首编 + N-1 次重试），防死循环
+_MAX_COMPILE_ATTEMPTS = 2
 
 
 class Compiler:
@@ -47,6 +49,7 @@ class Compiler:
         metrics = [c for c in concepts if c.kind == ConceptKind.metric]
         derivations = [c for c in concepts if c.kind == ConceptKind.derivation]
         actions = [c for c in concepts if c.kind == ConceptKind.action]
+        relations = [c for c in concepts if c.kind == ConceptKind.relation]
         # 临时聚合让 metric 变可选：只要有实体（带度量属性）即可取数；空本体才拒绝
         if not entities and not metrics:
             return SQG(question=question, nodes=[], context={"error": "ontology has no entities or metrics"})
@@ -86,6 +89,13 @@ class Compiler:
             f"  - id={a.id}｜名称={a.name}｜说明={a.semantics or ''}" for a in actions
         ) or "  （无）"
 
+        def rel_line(r) -> str:
+            a = r.attrs or {}
+            fe, te = a.get("from_entity"), a.get("to_entity")
+            fk, tk = a.get("from_key"), a.get("to_key")
+            return f"  - {fe} —({fk}↔{tk})— {te}"
+        rel_lines = "\n".join(rel_line(r) for r in relations) or "  （无）"
+
         # 按本体可用算子裁剪：挂了 agent 即可 ASK、挂了 action 即可 ACT；
         # 派生/动作概念是"可选的具名模板"，没有也能用自由 prompt 的 ASK。
         has_ask = self._op_available("ASK")
@@ -102,6 +112,8 @@ class Compiler:
         cap_lines = [
             "# 实体的维度与度量（filters 从维度或度量选；group_by 只用维度；临时聚合的 measure 只用度量）",
             entity_lines,
+            "# 实体间关系（同一取数节点内引用的概念必须能靠这些关系直接/间接连通）",
+            rel_lines,
             metrics_hint, metric_lines or "  （无）",
         ]
         if has_ask and derivations:
@@ -142,6 +154,8 @@ class Compiler:
         if has_act:
             chain += " → 行动(ACT)"
         rules.append(f"- concept（指标/维度/度量）必须是上面清单里的 id。只用问题真正需要的节点；形成「{chain}」的依赖链。")
+        rules.append("- **一个取数节点内引用的所有概念（指标/度量/维度/过滤）必须能靠上面的『实体间关系』连通」（直接或经中间维表间接）；同一术语有多个候选时，选能和本节点其它概念连通的那个。互不关联的量（如不同事实表）拆成**独立节点**、用 ASK 综合，别塞进一个节点。")
+        rules.append("- 若问题需要的概念/数据清单里没有，或所需概念之间没有任何关系无法关联，**不要硬凑相近概念**；输出 {\"nodes\":[],\"reason\":\"简述缺什么/为何无法回答\"}。")
         rules.append("- id 用 n1,n2,... 顺序编号。只输出 JSON，不要多余文字。")
 
         # 强意图拆解指令：多意图问题必须逐句建节点，别漏 ASK/ACT
@@ -169,18 +183,54 @@ class Compiler:
             + "# 规则（重要）\n" + "\n".join(rules)
         )
 
-        out = self.llm.complete(
-            [{"role": "system", "content": system}, {"role": "user", "content": question}],
-            schema={"type": "object"},
-        )
         # 记录本次编译的完整提示词（落 run_stage.logs，供排查）
         if ctx is not None:
             ctx.stage_logs["prompt"] = {"system": system, "user": question}
-        data = out if isinstance(out, dict) else json.loads(out)
-        return self._build_sqg(question, data)
 
-    # ── 把 LLM 的 JSON 组装成 SQG（轻校验，不做业务重写）──
-    def _build_sqg(self, question: str, data: dict) -> SQG:
+        # 编译 + 自校验；失败（无关系/引用不存在概念）则带反馈重编，最多 _MAX_COMPILE_ATTEMPTS 次（防死循环）
+        attempts: list[dict] = []
+        feedback: Optional[str] = None
+        for i in range(_MAX_COMPILE_ATTEMPTS):
+            msgs = [{"role": "system", "content": system},
+                    {"role": "user", "content": question}]
+            if feedback:
+                msgs.append({"role": "user", "content": feedback})
+            out = self.llm.complete(msgs, schema={"type": "object"})
+            data = out if isinstance(out, dict) else json.loads(out)
+            # LLM 显式弃权（答不了）→ 直接报错，不重试
+            reason = (data.get("reason") or "").strip() if isinstance(data, dict) else ""
+            if reason and not data.get("nodes"):
+                attempts.append({"attempt": i + 1, "unanswerable": reason})
+                self._log_attempts(ctx, attempts)
+                return SQG(question=question, nodes=[],
+                           context={"error": f"{reason}", "attempts": attempts})
+            sqg, err = self._build_sqg(question, data)
+            attempts.append({"attempt": i + 1, "nodes": len(sqg.nodes),
+                             **({"error": err} if err else {})})
+            if err is None:
+                if len(attempts) > 1:
+                    sqg.context["recompiled"] = len(attempts) - 1
+                sqg.context["attempts"] = attempts
+                self._log_attempts(ctx, attempts)
+                return sqg
+            feedback = (
+                "上次生成的查询无法编译，原因：" + err + "。\n"
+                "请重新生成：确保**同一取数节点内引用的概念能通过『实体间关系』连通**、"
+                "且只引用清单里存在的概念 id；若确实无法用现有概念回答，"
+                "输出 {\"nodes\":[],\"reason\":\"简述缺什么\"}。只输出 JSON。"
+            )
+        # 用尽重试仍失败
+        self._log_attempts(ctx, attempts)
+        return SQG(question=question, nodes=[],
+                   context={"error": attempts[-1].get("error") or "无法编译",
+                            "recompiled": len(attempts) - 1, "attempts": attempts})
+
+    def _log_attempts(self, ctx: Optional[ExecContext], attempts: list) -> None:
+        if ctx is not None:
+            ctx.stage_logs["attempts"] = attempts
+
+    # ── 把 LLM 的 JSON 组装成 SQG（轻校验）+ 自校验；返回 (SQG, 可重试的失败原因|None) ──
+    def _build_sqg(self, question: str, data: dict) -> tuple[SQG, Optional[str]]:
         raw_nodes = data.get("nodes") or []
         ids = {n.get("id") for n in raw_nodes if n.get("id")}
         nodes: list[SQGNode] = []
@@ -204,21 +254,46 @@ class Compiler:
                 params=params,
                 depends_on=depends_on,
             ))
-        # 关系连通性校验：聚合若跨多个实体，这些实体必须能靠 relation 连成一张图
-        # （支持**间接关系**：中间可经桥接/维表中转）；否则无法生成合法的联合(join)
-        # 算子 —— 在编译期就提前报错，不留给优化器。
+        sqg = SQG(question=question, nodes=nodes,
+                  context={"intent": data.get("intent") or "auto", "generated_by": "llm"})
+
+        # 自校验（返回可重试的原因）：
+        #  ① 存在性：引用的 concept/measure/group_by/filter 必须在本体里、且类型对。
+        #  ② 连通性：跨多实体的聚合，这些实体必须能靠 relation 直接/间接连通。
         for n in nodes:
             if n.operator != Operator.AGGREGATE:
                 continue
+            err = self._check_refs(n)
+            if err:
+                return sqg, err
             ents = self._agg_entities(n)
             if len(ents) > 1 and not connected(self.ontology, ents):
                 names = "、".join(self._entity_name(e) for e in sorted(ents))
-                return SQG(question=question, nodes=[], context={"error": (
-                    f"「{n.name}」涉及的实体（{names}）之间缺少关系(relation)，"
-                    f"无法连接取数。请先在本体画布上连上对应的外键关系。"
-                )})
-        context = {"intent": data.get("intent") or "auto", "generated_by": "llm"}
-        return SQG(question=question, nodes=nodes, context=context)
+                return sqg, (f"「{n.name}」涉及的实体（{names}）之间缺少关系(relation)，"
+                             f"无法在同一取数节点内关联（若确需关联，请在本体画板上连上外键关系）")
+        return sqg, None
+
+    # 引用存在性 + 类型校验：任一引用不存在/类型不对 → 返回错因（可重试）。
+    def _check_refs(self, node: SQGNode) -> Optional[str]:
+        def chk(cid, kind, label):
+            if not cid:
+                return None
+            c = self.ontology.get_concept(cid)
+            if c is None:
+                return f"{label}引用了不存在的概念「{cid}」"
+            if kind and c.kind != kind:
+                return f"{label}「{cid}」类型不对（应为 {kind.value}）"
+            return None
+        err = (chk(node.concept, ConceptKind.metric, "指标 concept")
+               or chk(node.params.get("measure"), ConceptKind.attribute, "度量 measure")
+               or chk(node.params.get("group_by"), ConceptKind.attribute, "分组 group_by"))
+        if err:
+            return err
+        for f in node.params.get("filters", []) or []:
+            err = chk(f.get("concept"), ConceptKind.attribute, "过滤 filter")
+            if err:
+                return err
+        return None
 
     # ── 聚合节点涉及的实体集合（指标口径 + measure + group_by + filters）──
     def _agg_entities(self, node: SQGNode) -> set:
@@ -248,7 +323,7 @@ class Compiler:
         return c.name if (c and c.name) else entity_id
 
     def _clean_filters(self, filters) -> list[dict]:
-        """只保留指向真实属性 concept 的过滤，保留操作符 op（默认 =）。不做角色映射/跨实体改写。"""
+        """只做形状整理（保留 op 默认 =、value_format，丢空值）；概念是否存在/类型由 _check_refs 校验。"""
         out: list[dict] = []
         items = filters if isinstance(filters, list) else []
         for f in items:
@@ -260,10 +335,8 @@ class Compiler:
             empty = (value in (None, "")) and not (op == "in" and isinstance(value, list) and value)
             if not cid or empty:
                 continue
-            c = self.ontology.get_concept(cid)
-            if c and c.kind == ConceptKind.attribute:
-                item = {"concept": cid, "op": op, "value": value}
-                if f.get("value_format"):
-                    item["value_format"] = f["value_format"]
-                out.append(item)
+            item = {"concept": cid, "op": op, "value": value}
+            if f.get("value_format"):
+                item["value_format"] = f["value_format"]
+            out.append(item)
         return out
