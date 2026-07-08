@@ -25,7 +25,7 @@ namespace DataNexus.Server.Controllers
         public async Task<APIResponseModel> GetRuns([FromQuery] int take = 50)
         {
             var t = await _sql.QueryAsync(
-                @"SELECT TOP (@take) run_id, question, as_user, ontology_id, [state], cost_ms, created_at
+                @"SELECT TOP (@take) run_id, question, as_user, context, [state], cost_ms, created_at
                   FROM nexus.run ORDER BY created_at DESC",
                 new[] { new SqlParameter("@take", take) });
 
@@ -34,7 +34,7 @@ namespace DataNexus.Server.Controllers
                 run_id = r.Field<string>("run_id"),
                 question = r.Field<string?>("question"),
                 as_user = r.Field<string?>("as_user"),
-                ontology_id = r.Field<string?>("ontology_id"),
+                context = r.Field<string?>("context"),
                 state = r.Field<string?>("state"),
                 cost_ms = r.IsNull("cost_ms") ? 0 : r.Field<int>("cost_ms"),
                 created_at = r.Field<DateTime?>("created_at"),
@@ -50,7 +50,7 @@ namespace DataNexus.Server.Controllers
             var p = new[] { new SqlParameter("@id", runId) };
 
             var runT = await _sql.QueryAsync(
-                @"SELECT run_id, question, as_user, ontology_id, [state], answer, cost_ms, created_at, updated_at
+                @"SELECT run_id, question, as_user, context, [state], answer, cost_ms, created_at, updated_at
                   FROM nexus.run WHERE run_id = @id", p);
             var rr = runT.AsEnumerable().FirstOrDefault();
             if (rr == null)
@@ -61,7 +61,7 @@ namespace DataNexus.Server.Controllers
                 run_id = rr.Field<string>("run_id"),
                 question = rr.Field<string?>("question"),
                 as_user = rr.Field<string?>("as_user"),
-                ontology_id = rr.Field<string?>("ontology_id"),
+                context = rr.Field<string?>("context"),
                 state = rr.Field<string?>("state"),
                 answer = rr.Field<string?>("answer"),
                 cost_ms = rr.IsNull("cost_ms") ? 0 : rr.Field<int>("cost_ms"),

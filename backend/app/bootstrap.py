@@ -69,11 +69,11 @@ class DbRunRecorder(RunRecorder):
             _run_log.warning(f"run recorder failed: {exc}")
 
     # ── run ──
-    def start_run(self, run_id, question, as_user, ontology_id=None):
+    def start_run(self, run_id, question, as_user, context=None):
         self._exec(
-            """INSERT INTO nexus.run (run_id, question, as_user, ontology_id, [state], cost_ms, created_at, updated_at)
+            """INSERT INTO nexus.run (run_id, question, as_user, context, [state], cost_ms, created_at, updated_at)
                VALUES (?, ?, ?, ?, 'running', 0, SYSUTCDATETIME(), SYSUTCDATETIME())""",
-            (run_id, question, as_user, ontology_id),
+            (run_id, question, as_user, context),
         )
 
     def finish_run(self, run_id, state, answer, cost_ms):
@@ -84,10 +84,10 @@ class DbRunRecorder(RunRecorder):
             (state, answer, cost_ms, run_id),
         )
 
-    def set_run_ontology(self, run_id, ontology_id):
+    def set_run_context(self, run_id, context):
         self._exec(
-            "UPDATE nexus.run SET ontology_id = ?, updated_at = SYSUTCDATETIME() WHERE run_id = ?",
-            (ontology_id, run_id),
+            "UPDATE nexus.run SET context = ?, updated_at = SYSUTCDATETIME() WHERE run_id = ?",
+            (context, run_id),
         )
 
     # ── stage ──

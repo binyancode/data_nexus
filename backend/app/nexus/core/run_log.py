@@ -21,13 +21,13 @@ class RunRecorder(ABC):
     # ── run（整体）──
     @abstractmethod
     def start_run(self, run_id: str, question: str, as_user: Optional[str],
-                  ontology_id: Optional[str] = None) -> None: ...
+                  context: Optional[str] = None) -> None: ...
 
     @abstractmethod
     def finish_run(self, run_id: str, state: str, answer: Optional[str], cost_ms: int) -> None: ...
 
     @abstractmethod
-    def set_run_ontology(self, run_id: str, ontology_id: Optional[str]) -> None: ...
+    def set_run_context(self, run_id: str, context: Optional[str]) -> None: ...
 
     # ── stage（四个引擎）──
     @abstractmethod
@@ -51,9 +51,9 @@ class RunRecorder(ABC):
 class NullRunRecorder(RunRecorder):
     """空记录器：不落库（默认 / 测试用）。"""
 
-    def start_run(self, run_id, question, as_user, ontology_id=None): pass
+    def start_run(self, run_id, question, as_user, context=None): pass
     def finish_run(self, run_id, state, answer, cost_ms): pass
-    def set_run_ontology(self, run_id, ontology_id): pass
+    def set_run_context(self, run_id, context): pass
     def start_stage(self, run_id, stage, input): pass
     def finish_stage(self, run_id, stage, state, output, error, cost_ms, logs=None): pass
     def start_node(self, run_id, node_id, resolver, call): pass

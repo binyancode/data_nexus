@@ -60,7 +60,8 @@ class NexusClient:
         ctx.llm_name = llm_name
         ctx.requested_ontology_id = ontology_id
         ctx.recorder = get_run_recorder()
-        ctx.recorder.start_run(ctx.run_id, question, as_user, ontology_id)
+        # context 建 run 时留空（本体未知）；初始化器选完后写 {"ontology_ids":[...]}
+        ctx.recorder.start_run(ctx.run_id, question, as_user)
         threading.Thread(target=self.ask, args=(ctx,), daemon=True).start()
         return ctx.run_id
 
@@ -73,12 +74,12 @@ class NexusClient:
                                 lambda: self.initializer.run(ctx),
                                 _dumps({"question": question,
                                         "requested_ontology_id": ctx.requested_ontology_id}),
-                                lambda s: _dumps({"ontology_id": s.ontology_id, "name": s.name,
+                                lambda s: _dumps({"ontology_ids": s.ontology_ids, "names": s.names,
                                                   "selection": ctx.stage_logs.get("selection")}))
             sqg = self._stage(ctx, "compiler",
                               lambda: Compiler(scope.ontology, self.registry.llm(ctx.llm_name),
                                                scope.available_ops).compile(question, ctx),
-                              _dumps({"question": question, "ontology_id": ctx.ontology_id}),
+                              _dumps({"question": question, "ontology_ids": ctx.ontology_ids}),
                               lambda r: r.model_dump_json())
             plan = self._stage(ctx, "optimizer",
                                lambda: Optimizer(scope.ontology, self.registry, scope.allowed).plan(sqg, ctx),

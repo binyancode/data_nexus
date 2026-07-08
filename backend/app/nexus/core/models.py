@@ -228,11 +228,11 @@ class ExecContext:
     """一次运行的执行上下文（非 pydantic：含取消令牌等运行时对象）。"""
 
     def __init__(self, question: str, as_user: Optional[str] = None, cancellation_token: Any = None,
-                 run_id: Optional[str] = None, ontology_id: Optional[str] = None):
+                 run_id: Optional[str] = None):
         self.run_id: str = run_id or uuid.uuid4().hex
         self.question = question
         self.as_user = as_user
-        self.ontology_id = ontology_id
+        self.ontology_ids: list[str] = []                 # 本次运行选中的本体集合（初始化器填）
         self.requested_ontology_id: Optional[str] = None  # 用户显式指定的本体（None=交初始化器 LLM 路由）
         self.llm_name: Optional[str] = None       # 本次运行选中的规划 LLM（None=用默认）
         self.cancellation_token = cancellation_token

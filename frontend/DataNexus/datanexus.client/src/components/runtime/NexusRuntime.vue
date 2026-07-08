@@ -3,7 +3,7 @@
     <div class="rt-topline">
       <span class="rt-dot" :style="runtimeDotStyle(runState)"></span>
       <span class="rt-q">{{ detail?.run?.question || question || '—' }}</span>
-      <span v-if="ontologyLabel" class="rt-meta" title="本体">📚 {{ ontologyLabel }}</span>
+      <span v-for="(lbl, i) in ontologyLabels" :key="i" class="rt-meta" title="本体">📚 {{ lbl }}</span>
       <span
         v-if="detail?.run?.run_id"
         class="rt-meta rt-runid"
@@ -46,10 +46,10 @@
 
         <div v-else-if="selected === 'context'" class="ho-panel">
           <div class="d-title">交接物 · 本体<span>初始化器 → 编译器 · 本次选定的本体</span></div>
-          <div v-if="pickedOntology" class="res-list">
-            <div class="res-row">
-              <span class="res-name">{{ pickedOntology.name || pickedOntology.ontology_id }}</span>
-              <span class="res-src">{{ pickedOntology.ontology_id }}</span>
+          <div v-if="pickedOntologies.length" class="res-list">
+            <div v-for="p in pickedOntologies" :key="p.ontology_id" class="res-row">
+              <span class="res-name">{{ p.name }}</span>
+              <span class="res-src">{{ p.ontology_id }}</span>
             </div>
           </div>
           <div v-else class="res-empty">尚未选定</div>
@@ -126,16 +126,25 @@ listOntologies()
     ontoNames.value = Object.fromEntries(list.map((o) => [o.ontologyId, o.name]))
   })
   .catch(() => {})
-const ontologyLabel = computed(() => {
-  const id = detail.value?.run?.ontology_id
-  if (!id) return ''
-  return ontoNames.value[id] || id
+const ontologyLabels = computed<string[]>(() => {
+  const raw = detail.value?.run?.context
+  if (!raw) return []
+  let ids: string[] = []
+  try {
+    ids = JSON.parse(raw)?.ontology_ids ?? []
+  } catch {
+    /* 非 JSON 旧数据容错 */
+  }
+  return ids.map((id) => ontoNames.value[id] || id)
 })
 
-// 初始化器交接物「本体」：本次选定的本体（读初始化器段 output）
-const pickedOntology = computed(() =>
-  safeParse<{ ontology_id: string; name?: string }>(stageOf('initializer')?.output),
-)
+// 初始化器交接物「本体」：本次选定的本体集合（读初始化器段 output）
+const pickedOntologies = computed(() => {
+  const o = safeParse<{ ontology_ids?: string[]; names?: string[] }>(stageOf('initializer')?.output)
+  const ids = o?.ontology_ids ?? []
+  const names = o?.names ?? []
+  return ids.map((id, i) => ({ ontology_id: id, name: names[i] || id }))
+})
 
 // run id：太长 → 显示短前缀，点击复制完整 id，hover 看全量
 const shortRunId = computed(() => (detail.value?.run?.run_id || '').slice(0, 8))
@@ -222,7 +231,7 @@ const runningNode = computed(() => (detail.value?.nodes ?? []).find((n) => n.sta
 const autoTarget = computed(() => {
   const rs = runState.value
   if (rs === 'done' || rs === 'failed') return 'generator'
-  const order = ['compiler', 'optimizer', 'coordinator', 'generator']
+  const order = ['initializer', 'compiler', 'optimizer', 'coordinator', 'generator']
   let running: string | null = null
   let lastStarted: string | null = null
   for (const s of order) {
@@ -230,7 +239,7 @@ const autoTarget = computed(() => {
     if (st === 'running') running = s
     if (st === 'running' || st === 'done') lastStarted = s
   }
-  const cur = running ?? lastStarted ?? 'compiler'
+  const cur = running ?? lastStarted ?? 'initializer'
   return cur === 'coordinator' ? 'exec' : cur
 })
 
@@ -277,7 +286,7 @@ function reset() {
   detail.value = null
   error.value = ''
   polling.value = false
-  selected.value = 'compiler'
+  selected.value = 'initializer'
   autoFollow.value = true
   tries = 0
   emitted = false

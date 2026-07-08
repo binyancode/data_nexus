@@ -46,7 +46,7 @@ export interface RunInfo {
   cost_ms: number
   created_at: string | null
   updated_at: string | null
-  ontology_id: string | null
+  context: string | null   // JSON 字符串：{"ontology_ids":[...]}（本次运行上下文）
 }
 
 export interface RunDetail {
