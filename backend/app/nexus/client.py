@@ -78,7 +78,8 @@ class NexusClient:
                                                   "selection": ctx.stage_logs.get("selection")}))
             sqg = self._stage(ctx, "compiler",
                               lambda: Compiler(scope.ontology, self.registry.llm(ctx.llm_name),
-                                               scope.available_ops).compile(question, ctx),
+                                               scope.available_ops,
+                                               dict(zip(scope.ontology_ids, scope.names))).compile(question, ctx),
                               _dumps({"question": question, "ontology_ids": ctx.ontology_ids}),
                               lambda r: r.model_dump_json())
             plan = self._stage(ctx, "optimizer",

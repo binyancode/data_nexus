@@ -1,4 +1,4 @@
-"""Build the Data Nexus PPTX (18 slides): PNG images + example-driven speaker notes."""
+"""Build the Data Nexus PPTX (19 slides): PNG images + example-driven speaker notes."""
 import sys
 from pathlib import Path
 

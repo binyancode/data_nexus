@@ -112,60 +112,67 @@
     <text x="95" y="80" fill="#4FACFE" font-size="21" font-weight="700">① 知识层 · 本体 —— 系统认识什么（静态）</text>
     <rect x="95" y="96" width="650" height="52" rx="10" fill="#173049" stroke="#2E4060"/>
     <text x="115" y="129" fill="#EAF0F6" font-size="19">Concept 业务名词：销售额 / 地区 / 客户</text>
-    <rect x="765" y="96" width="765" height="52" rx="10" fill="#173049" stroke="#2E4060"/>
+    <rect x="765" y="96" width="740" height="52" rx="10" fill="#173049" stroke="#2E4060"/>
     <text x="785" y="129" fill="#EAF0F6" font-size="19">Binding 概念→真实表：销售额 = SUM(fact_sales.amount)</text>
-    <text x="95" y="238" fill="#D0A98A" font-size="21" font-weight="700">运行引擎 · 一次提问从进到出（动态）</text>
+    <text x="95" y="238" fill="#D0A98A" font-size="21" font-weight="700">运行引擎（动态）</text>
     <g text-anchor="middle">
-      <rect x="60" y="268" width="140" height="112" rx="12" fill="#33251A" stroke="#FB923C"/>
-      <text x="130" y="318" fill="#FB923C" font-size="20" font-weight="700">用户提问</text>
-      <text x="130" y="348" fill="#B0BEC5" font-size="15">自然语言</text>
-      <rect x="230" y="268" width="228" height="112" rx="12" fill="#1C2A42" stroke="#7FB0E0"/>
-      <text x="344" y="312" fill="#7FB0E0" font-size="20" font-weight="700">② 编译器</text>
-      <text x="344" y="342" fill="#B0BEC5" font-size="15">NL + Concept → SQG</text>
-      <rect x="488" y="268" width="120" height="112" rx="12" fill="#173049" stroke="#4FACFE"/>
-      <text x="548" y="312" fill="#4FACFE" font-size="20" font-weight="700">SQG</text>
-      <text x="548" y="342" fill="#B0BEC5" font-size="14">查询指令</text>
-      <rect x="638" y="268" width="210" height="112" rx="12" fill="#1C2A42" stroke="#7FB0E0"/>
-      <text x="743" y="312" fill="#7FB0E0" font-size="20" font-weight="700">③ 优化器 Optimizer</text>
-      <text x="743" y="342" fill="#B0BEC5" font-size="15">竞标路由·选源</text>
-      <rect x="878" y="268" width="240" height="112" rx="12" fill="#16302A" stroke="#34D399"/>
-      <text x="998" y="312" fill="#34D399" font-size="20" font-weight="700">④ 协调器 Coordinator</text>
-      <text x="998" y="342" fill="#B0BEC5" font-size="15">并行执行 + 融合裁决</text>
-      <rect x="1148" y="268" width="230" height="112" rx="12" fill="#1C2A42" stroke="#7FB0E0"/>
-      <text x="1263" y="312" fill="#7FB0E0" font-size="20" font-weight="700">⑤ 生成器 Generator</text>
-      <text x="1263" y="342" fill="#B0BEC5" font-size="15">合成答案</text>
-      <rect x="1408" y="268" width="132" height="112" rx="12" fill="#173049" stroke="#4FACFE"/>
-      <text x="1474" y="333" fill="#EAF0F6" font-size="20" font-weight="700">答案</text>
+      <rect x="60" y="268" width="120" height="112" rx="12" fill="#33251A" stroke="#FB923C"/>
+      <text x="120" y="312" fill="#FB923C" font-size="18" font-weight="700">用户提问</text>
+      <text x="120" y="344" fill="#B0BEC5" font-size="14">自然语言</text>
+      <rect x="220" y="268" width="200" height="112" rx="12" fill="#12303A" stroke="#22D3EE"/>
+      <text x="320" y="304" fill="#22D3EE" font-size="19" font-weight="700">② 初始化器</text>
+      <text x="320" y="330" fill="#EAF0F6" font-size="13.5">选本体（可多选）</text>
+      <text x="320" y="354" fill="#B0BEC5" font-size="13">+ RAG 检索概念/口径</text>
+      <rect x="460" y="268" width="175" height="112" rx="12" fill="#1C2A42" stroke="#7FB0E0"/>
+      <text x="547" y="312" fill="#7FB0E0" font-size="18" font-weight="700">③ 编译器</text>
+      <text x="547" y="344" fill="#B0BEC5" font-size="14">NL+知识 → SQG</text>
+      <rect x="675" y="268" width="200" height="112" rx="12" fill="#1C2A42" stroke="#7FB0E0"/>
+      <text x="775" y="312" fill="#7FB0E0" font-size="18" font-weight="700">④ 优化器</text>
+      <text x="775" y="344" fill="#B0BEC5" font-size="14">竞标路由 · 选源</text>
+      <rect x="915" y="268" width="215" height="112" rx="12" fill="#16302A" stroke="#34D399"/>
+      <text x="1022" y="312" fill="#34D399" font-size="18" font-weight="700">⑤ 协调器</text>
+      <text x="1022" y="344" fill="#B0BEC5" font-size="14">并行执行 + 裁决</text>
+      <rect x="1170" y="268" width="200" height="112" rx="12" fill="#1C2A42" stroke="#7FB0E0"/>
+      <text x="1270" y="312" fill="#7FB0E0" font-size="18" font-weight="700">⑥ 生成器</text>
+      <text x="1270" y="344" fill="#B0BEC5" font-size="14">合成答案 + 血缘</text>
+      <rect x="1410" y="268" width="120" height="112" rx="12" fill="#173049" stroke="#4FACFE"/>
+      <text x="1470" y="333" fill="#EAF0F6" font-size="18" font-weight="700">答案</text>
     </g>
     <g stroke="#4FACFE" stroke-width="2" fill="none">
-      <line x1="200" y1="324" x2="226" y2="324" marker-end="url(#bpa)"/>
-      <line x1="458" y1="324" x2="484" y2="324" marker-end="url(#bpa)"/>
-      <line x1="608" y1="324" x2="634" y2="324" marker-end="url(#bpa)"/>
-      <line x1="848" y1="324" x2="874" y2="324" marker-end="url(#bpa)"/>
-      <line x1="1118" y1="324" x2="1144" y2="324" marker-end="url(#bpa)"/>
-      <line x1="1378" y1="324" x2="1404" y2="324" marker-end="url(#bpa)"/>
+      <line x1="180" y1="324" x2="216" y2="324" marker-end="url(#bpa)"/>
+      <line x1="420" y1="324" x2="456" y2="324" marker-end="url(#bpa)"/>
+      <line x1="635" y1="324" x2="671" y2="324" marker-end="url(#bpa)"/>
+      <line x1="875" y1="324" x2="911" y2="324" marker-end="url(#bpa)"/>
+      <line x1="1130" y1="324" x2="1166" y2="324" marker-end="url(#bpa)"/>
+      <line x1="1370" y1="324" x2="1406" y2="324" marker-end="url(#bpa)"/>
     </g>
+    <text x="653" y="400" fill="#8aa0b8" font-size="13" text-anchor="middle">SQG</text>
+    <text x="893" y="400" fill="#8aa0b8" font-size="13" text-anchor="middle">PEP</text>
     <rect x="70" y="500" width="1460" height="160" rx="14" fill="#14281f" stroke="#34D399"/>
-    <text x="95" y="534" fill="#34D399" font-size="21" font-weight="700">⑥ 能力层 · Resolver（真实源 / 智能体 / 动作）—— 系统能做什么、从哪取（静态）</text>
+    <text x="95" y="534" fill="#34D399" font-size="21" font-weight="700">⑦ 能力层 · Resolver（真实源 / 智能体 / 动作）—— 系统能做什么、从哪取（静态）</text>
     <g>
       <rect x="95" y="552" width="440" height="88" rx="10" fill="#1C2A42" stroke="#4FACFE"/>
       <text x="115" y="588" fill="#4FACFE" font-size="19" font-weight="700">数据源 Resolver</text>
-      <text x="115" y="618" fill="#B0BEC5" font-size="18">SQL 库 / 文件 / 向量库　（第6、7页）</text>
+      <text x="115" y="618" fill="#B0BEC5" font-size="18">SQL 库 / 文件 / 向量库</text>
       <rect x="560" y="552" width="440" height="88" rx="10" fill="#33251A" stroke="#FB923C"/>
       <text x="580" y="588" fill="#FB923C" font-size="19" font-weight="700">Agent Resolver</text>
-      <text x="580" y="618" fill="#B0BEC5" font-size="18">Data Agent 问答 / 归因　（第6、7页）</text>
+      <text x="580" y="618" fill="#B0BEC5" font-size="18">Data Agent 问答 / 归因</text>
       <rect x="1025" y="552" width="480" height="88" rx="10" fill="#251C3A" stroke="#A78BFA"/>
       <text x="1045" y="588" fill="#A78BFA" font-size="19" font-weight="700">动作 Resolver</text>
-      <text x="1045" y="618" fill="#B0BEC5" font-size="18">写回 / 派单 / 审批　（第6、7页）</text>
+      <text x="1045" y="618" fill="#B0BEC5" font-size="18">写回 / 派单 / 审批</text>
     </g>
     <g stroke="#8aa0b8" stroke-width="2" fill="none" stroke-dasharray="6 6">
-      <line x1="344" y1="164" x2="344" y2="266" marker-end="url(#bpd)"/>
-      <line x1="743" y1="500" x2="743" y2="382" marker-end="url(#bpd)"/>
-      <line x1="998" y1="500" x2="998" y2="382" marker-end="url(#bpd)"/>
+      <line x1="320" y1="164" x2="320" y2="266" marker-end="url(#bpd)"/>
+      <line x1="547" y1="164" x2="547" y2="266" marker-end="url(#bpd)"/>
+      <line x1="775" y1="164" x2="775" y2="266" marker-end="url(#bpd)"/>
+      <line x1="775" y1="500" x2="775" y2="382" marker-end="url(#bpd)"/>
+      <line x1="1022" y1="500" x2="1022" y2="382" marker-end="url(#bpd)"/>
     </g>
-    <text x="358" y="210" fill="#8aa0b8" font-size="15">编译时查 Concept / Binding</text>
-    <text x="626" y="470" fill="#8aa0b8" font-size="15">选源</text>
-    <text x="1010" y="470" fill="#8aa0b8" font-size="15">调用 Resolver 执行</text>
+    <text x="334" y="205" fill="#8aa0b8" font-size="15">选本体 · RAG 检索</text>
+    <text x="560" y="205" fill="#8aa0b8" font-size="15">编译时查 Concept</text>
+    <text x="790" y="205" fill="#8aa0b8" font-size="15">按 Binding 选源</text>
+    <text x="678" y="470" fill="#8aa0b8" font-size="15">竞标 · 校验 Resolver 能力</text>
+    <text x="1034" y="470" fill="#8aa0b8" font-size="15">调用 Resolver 执行</text>
   </svg>
 </div>
 
@@ -551,7 +558,7 @@
 <!-- ══════════════ Slide 7: 执行流水线 ══════════════ -->
 <div class="slide">
   <h2>十、执行总览：一次提问，四段引擎跑完</h2>
-  <div class="phase-subtitle">例：「华东上季度毛利为何下滑、跟华南比差在哪？给份说明，并把复盘任务派给区域负责人。」——编译器 → 优化器 → 协调器 → 生成器，四段流水线；跑完还有一层 Harness 评估回路，不合理就带着问题重来</div>
+  <div class="phase-subtitle">例：「华东上季度毛利为何下滑、跟华南比差在哪？给份说明，并把复盘任务派给区域负责人。」——初始化器先备料（选本体 + 检索口径/示例，见下页），再交编译器 → 优化器 → 协调器 → 生成器，四段引擎流水线；跑完还有一层 Harness 评估回路，不合理就带着问题重来</div>
   <svg viewBox="0 0 1600 718">
     <defs>
       <marker id="ov" markerWidth="13" markerHeight="13" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#8aa0b8"/></marker>
@@ -625,9 +632,98 @@
   </svg>
 </div>
 
+<!-- ══════════════ Slide 10b: 初始化器 ══════════════ -->
+<div class="slide">
+  <h2>十一、初始化器：编译前的智能备料</h2>
+  <div class="phase-subtitle">流水线第一段：在编译器动手前，先把「编译需要的一切」备好——选定本体、检索口径与示例、裁剪相关子图；把“备料”从编译器里拆出来，编译器只专注 NL→SQG</div>
+  <svg viewBox="0 0 1600 718">
+    <defs>
+      <marker id="iza" markerWidth="13" markerHeight="13" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#4FACFE"/></marker>
+    </defs>
+    <!-- top flow -->
+    <g text-anchor="middle">
+      <rect x="40" y="46" width="200" height="80" rx="12" fill="#33251A" stroke="#FB923C"/>
+      <text x="140" y="82" fill="#FB923C" font-size="19" font-weight="700">用户提问</text>
+      <text x="140" y="108" fill="#B0BEC5" font-size="14">自然语言</text>
+      <rect x="296" y="34" width="540" height="104" rx="14" fill="#12303A" stroke="#22D3EE" stroke-width="2.5"/>
+      <text x="566" y="78" fill="#22D3EE" font-size="24" font-weight="700">初始化器 · Initializer</text>
+      <text x="566" y="110" fill="#EAF0F6" font-size="16">编译前的智能备料 · 流水线第①段</text>
+      <rect x="892" y="50" width="380" height="72" rx="12" fill="#173049" stroke="#4FACFE"/>
+      <text x="1082" y="82" fill="#4FACFE" font-size="17" font-weight="700">选中本体（可多选）</text>
+      <text x="1082" y="106" fill="#B0BEC5" font-size="14">+ 知识包：口径 · 示例 · 子图</text>
+      <rect x="1328" y="50" width="232" height="72" rx="12" fill="#1C2A42" stroke="#7FB0E0"/>
+      <text x="1444" y="82" fill="#7FB0E0" font-size="19" font-weight="700">编译器</text>
+      <text x="1444" y="106" fill="#B0BEC5" font-size="14">NL + 知识 → SQG</text>
+    </g>
+    <g stroke="#4FACFE" stroke-width="2" fill="none">
+      <line x1="240" y1="86" x2="292" y2="86" marker-end="url(#iza)"/>
+      <line x1="836" y1="86" x2="888" y2="86" marker-end="url(#iza)"/>
+      <line x1="1272" y1="86" x2="1324" y2="86" marker-end="url(#iza)"/>
+    </g>
+    <!-- section title -->
+    <text x="40" y="186" fill="#EAF0F6" font-size="19" font-weight="700">初始化器都做什么 —— 把「编译前的准备」从编译器里拆出来，让编译器只专注 NL→SQG</text>
+    <!-- 6 function cards -->
+    <g>
+      <rect x="40" y="210" width="490" height="228" rx="14" fill="#0F1A2B" stroke="#22D3EE" stroke-opacity="0.55"/>
+      <rect x="40" y="210" width="6" height="228" rx="3" fill="#22D3EE"/>
+      <circle cx="84" cy="256" r="19" fill="#22D3EE"/>
+      <text x="84" y="263" fill="#0F1A2B" font-size="20" font-weight="700" text-anchor="middle">1</text>
+      <text x="118" y="263" fill="#22D3EE" font-size="21" font-weight="700">智能选本体（可多选）</text>
+      <text x="72" y="314" fill="#C7D2DE" font-size="16">▸ 据问题路由到一个或多个本体；</text>
+      <text x="72" y="346" fill="#C7D2DE" font-size="16">▸ 跨域自动合并为统一作用域；</text>
+      <text x="72" y="378" fill="#C7D2DE" font-size="16">▸ id 加命名空间，本体间永不撞车。</text>
+
+      <rect x="555" y="210" width="490" height="228" rx="14" fill="#0F1A2B" stroke="#34D399" stroke-opacity="0.55"/>
+      <rect x="555" y="210" width="6" height="228" rx="3" fill="#34D399"/>
+      <circle cx="599" cy="256" r="19" fill="#34D399"/>
+      <text x="599" y="263" fill="#0F1A2B" font-size="20" font-weight="700" text-anchor="middle">2</text>
+      <text x="633" y="263" fill="#34D399" font-size="21" font-weight="700">RAG 检索指标 · 口径</text>
+      <text x="587" y="314" fill="#C7D2DE" font-size="16">▸ 检索句中提到的指标及口径；</text>
+      <text x="587" y="346" fill="#C7D2DE" font-size="16">▸ 计算方式直接喂给编译器；</text>
+      <text x="587" y="378" fill="#C7D2DE" font-size="16">▸ 不靠模型猜“毛利怎么算”。</text>
+
+      <rect x="1070" y="210" width="490" height="228" rx="14" fill="#0F1A2B" stroke="#7FB0E0" stroke-opacity="0.55"/>
+      <rect x="1070" y="210" width="6" height="228" rx="3" fill="#7FB0E0"/>
+      <circle cx="1114" cy="256" r="19" fill="#7FB0E0"/>
+      <text x="1114" y="263" fill="#0F1A2B" font-size="20" font-weight="700" text-anchor="middle">3</text>
+      <text x="1148" y="263" fill="#7FB0E0" font-size="21" font-weight="700">业务术语归一</text>
+      <text x="1102" y="314" fill="#C7D2DE" font-size="16">▸ 口语词 → 规范概念；</text>
+      <text x="1102" y="346" fill="#C7D2DE" font-size="16">▸ 「毛利」→ gross_margin；</text>
+      <text x="1102" y="378" fill="#C7D2DE" font-size="16">▸ 「上季度」→ 具体时间区间。</text>
+
+      <rect x="40" y="460" width="490" height="228" rx="14" fill="#0F1A2B" stroke="#FB923C" stroke-opacity="0.55"/>
+      <rect x="40" y="460" width="6" height="228" rx="3" fill="#FB923C"/>
+      <circle cx="84" cy="506" r="19" fill="#FB923C"/>
+      <text x="84" y="513" fill="#0F1A2B" font-size="20" font-weight="700" text-anchor="middle">4</text>
+      <text x="118" y="513" fill="#FB923C" font-size="21" font-weight="700">few-shot 示例检索</text>
+      <text x="72" y="564" fill="#C7D2DE" font-size="16">▸ 找相似历史问题 + 其 SQG；</text>
+      <text x="72" y="596" fill="#C7D2DE" font-size="16">▸ 作示例 in-context 引导编译；</text>
+      <text x="72" y="628" fill="#C7D2DE" font-size="16">▸ 沉淀“这类问题怎么编”。</text>
+
+      <rect x="555" y="460" width="490" height="228" rx="14" fill="#0F1A2B" stroke="#A78BFA" stroke-opacity="0.55"/>
+      <rect x="555" y="460" width="6" height="228" rx="3" fill="#A78BFA"/>
+      <circle cx="599" cy="506" r="19" fill="#A78BFA"/>
+      <text x="599" y="513" fill="#0F1A2B" font-size="20" font-weight="700" text-anchor="middle">5</text>
+      <text x="633" y="513" fill="#A78BFA" font-size="21" font-weight="700">相关子图裁剪</text>
+      <text x="587" y="564" fill="#C7D2DE" font-size="16">▸ 大本体只抽相关实体/属性/关系；</text>
+      <text x="587" y="596" fill="#C7D2DE" font-size="16">▸ 聚焦目录、降噪；</text>
+      <text x="587" y="628" fill="#C7D2DE" font-size="16">▸ 提升编译准确率。</text>
+
+      <rect x="1070" y="460" width="490" height="228" rx="14" fill="#0F1A2B" stroke="#FFD166" stroke-opacity="0.55"/>
+      <rect x="1070" y="460" width="6" height="228" rx="3" fill="#FFD166"/>
+      <circle cx="1114" cy="506" r="19" fill="#FFD166"/>
+      <text x="1114" y="513" fill="#0F1A2B" font-size="20" font-weight="700" text-anchor="middle">6</text>
+      <text x="1148" y="513" fill="#FFD166" font-size="21" font-weight="700">上下文 / 权限装配</text>
+      <text x="1102" y="564" fill="#C7D2DE" font-size="16">▸ 备好可用 Resolver、可用算子；</text>
+      <text x="1102" y="596" fill="#C7D2DE" font-size="16">▸ 装配用户权限作用域；</text>
+      <text x="1102" y="628" fill="#C7D2DE" font-size="16">▸ 交编译 / 优化直接用。</text>
+    </g>
+  </svg>
+</div>
+
 <!-- ══════════════ Slide 7b: 编译器 SQG ══════════════ -->
 <div class="slide">
-  <h2>十一、编译器：把问题拆成语义查询图（逻辑 SQG）</h2>
+  <h2>十二、编译器：把问题拆成语义查询图（逻辑 SQG）</h2>
   <div class="phase-subtitle">编译器按 Concept 把自然语言翻成一张 DAG——6 个节点 + 依赖边；此刻只有「问什么、谁依赖谁」，还没决定「谁来答、怎么跑」，绝不含 Resolver 或 SQL</div>
   <svg viewBox="0 0 1600 718">
     <defs>
@@ -716,7 +812,7 @@
 
 <!-- ══════════════ Slide 7c: 优化器 ══════════════ -->
 <div class="slide">
-  <h2>十二、优化器：逻辑 SQG → 物理执行计划（选源 · 下推 · 融合）</h2>
+  <h2>十三、优化器：逻辑 SQG → 物理执行计划（选源 · 下推 · 融合）</h2>
   <div class="phase-subtitle">优化器是全流程的大脑：给每个节点选中一个 Resolver，把同源节点融成一条 SQL 一次下推、跨源节点各自调用、依赖别人的留占位符，并把当前用户透传到每个源</div>
   <svg viewBox="0 0 1600 718">
     <defs>
@@ -782,7 +878,7 @@
 
 <!-- ══════════════ Slide 7d: 协调器 ══════════════ -->
 <div class="slide">
-  <h2>十三、协调器：按依赖分波并行 + 回填 + 合并裁决</h2>
+  <h2>十四、协调器：按依赖分波并行 + 回填 + 合并裁决</h2>
   <div class="phase-subtitle">优化器给了物理计划，协调器负责真正跑完这张 DAG——按依赖分波，能并行就并行；上游结果运行时回填下游；最后合并、数字冲突按信任分裁决</div>
   <svg viewBox="0 0 1600 718">
     <defs>
@@ -821,7 +917,7 @@
 
 <!-- ══════════════ Slide 7e: 生成器 ══════════════ -->
 <div class="slide">
-  <h2>十四、生成器：把结果写成答案 + 血缘 + 回执</h2>
+  <h2>十五、生成器：把结果写成答案 + 血缘 + 回执</h2>
   <div class="phase-subtitle">协调器合并后的结果交给生成器——组织成「对比结论 + 归因 + 证据」，标注每个数字的出处与信任分，并附上已完成的行动回执；全程留痕可回溯</div>
   <svg viewBox="0 0 1600 718">
     <!-- 左：最终答复卡片 -->
@@ -868,7 +964,7 @@
 
 <!-- ══════════════ Slide 7f: 评估回路 Harness ══════════════ -->
 <div class="slide">
-  <h2>十五、评估回路（Harness）：不合理就带着问题重来</h2>
+  <h2>十六、评估回路（Harness）：不合理就带着问题重来</h2>
   <div class="phase-subtitle">四段引擎跑完不算完——外面还套一层 Harness：给整轮打个分（报错了吗？各节点输出合理吗？最终答案/动作靠谱吗？），不合理就把问题点连同原问题拼成新提示词、重新编译执行；外层循环有最大轮数上限，防止空转</div>
   <svg viewBox="0 0 1600 718">
     <defs>
@@ -926,7 +1022,7 @@
 
 <!-- ══════════════ Slide 8: 落地路径 ══════════════ -->
 <div class="slide">
-  <h2>十六、落地路径：分五步建，从简单到完整</h2>
+  <h2>十七、落地路径：分五步建，从简单到完整</h2>
   <div class="phase-subtitle">先做最小的能用版本，再一步步加东西；每做完一步，都能单独演示一个用户用得上的功能</div>
   <svg viewBox="0 0 1600 718">
     <defs>
@@ -987,7 +1083,7 @@
 
 <!-- ══════════════ Slide 11: 大一统红利 ══════════════ -->
 <div class="slide">
-  <h2>十七、价值：这套设计带来什么</h2>
+  <h2>十八、价值：这套设计带来什么</h2>
   <div class="phase-subtitle">因为所有东西都统一成同一套做法，顺带得到这五个好处</div>
   <svg viewBox="0 0 1600 718">
     <g>

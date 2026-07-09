@@ -18,11 +18,11 @@ class Generator:
         parts, lineage, data_nodes = [], [], []
         status = "ok"
 
-        # 编译期硬错误（如缺少关系无法连接、空本体）：直接把错因作为答案报出。
+        # 编译期硬错误（如编译失败）：compiler 已框好「编译失败：…」，直接作为答案报出。
         cerr = (sqg.context or {}).get("error")
         if cerr and not sqg.nodes:
             return Answer(run_id=ctx.run_id, question=sqg.question,
-                          text=f"无法编译查询：{cerr}", status="error")
+                          text=cerr, status="error")
 
         for node in sqg.nodes:
             res = ctx.results.get(node.id)
