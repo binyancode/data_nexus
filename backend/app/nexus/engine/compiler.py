@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
+import time
 from typing import Optional
 
 from nexus.core.models import SQG, SQGNode, Operator, ConceptKind, ExecContext
@@ -24,6 +26,11 @@ _ATTR_TOKEN = re.compile(r"(?:[A-Za-z0-9_]+::)?attribute(?:\.[A-Za-z0-9_]+)+")
 _CONCEPT_TOKEN = re.compile(r"(?:[A-Za-z0-9_]+::)?(?:entity|attribute|metric|relation)(?:\.[A-Za-z0-9_]+)+")
 # 编译自校验失败时最多重编次数（1 次首编 + N-1 次重试），防死循环
 _MAX_COMPILE_ATTEMPTS = 2
+
+# ── SQG 编译缓存（进程内）：同一问题 + 同一本体集 + 同一算子集，1 小时内直接复用已编译的 SQG，跳过重编译。
+# 滞动过期：每次命中复用都重置 TTL 计时（last_used），常被问的问题不会过期。
+_SQG_CACHE_TTL_S = 3600
+_SQG_CACHE: dict[tuple, tuple[float, float, SQG]] = {}   # key -> (compiled_at, last_used_at, sqg)
 
 
 class Compiler:
@@ -41,10 +48,54 @@ class Compiler:
     def compile(self, question: str, ctx: Optional[ExecContext] = None) -> SQG:
         if self.llm is None:
             return self._fail(question, "未配置规划 LLM")
+        key = self._cache_key(question, ctx)
+        hit = self._cache_get(key)
+        if hit is not None:
+            return self._reuse(hit, ctx)
         try:
-            return self._compile_llm(question, ctx)
+            sqg = self._compile_llm(question, ctx)
         except Exception as exc:
             return self._fail(question, f"内部错误：{exc}")
+        if sqg.nodes:                       # 仅缓存成功编译（有节点）的计划；失败不缓存
+            now = time.time()
+            _SQG_CACHE[key] = (now, now, copy.deepcopy(sqg))
+        return sqg
+
+    # ── 编译缓存 ──
+    def _cache_key(self, question: str, ctx: Optional[ExecContext]) -> tuple:
+        # 本体集：优先用本次请求选中的本体 id，退化用编译器持有的本体名映射键
+        onto_ids = tuple(sorted(
+            (getattr(ctx, "ontology_ids", None) or list(self.onto_names.keys()))
+        ))
+        # 算子集也纳入 key：同问题同本体，但可用算子不同会编出不同 SQG
+        ops = tuple(sorted(self.available_ops)) if self.available_ops is not None else ()
+        return ((question or "").strip(), onto_ids, ops)
+
+    def _cache_get(self, key: tuple) -> Optional[tuple]:
+        ent = _SQG_CACHE.get(key)
+        if ent is None:
+            return None
+        compiled_at, last_used, sqg = ent
+        now = time.time()
+        if now - last_used > _SQG_CACHE_TTL_S:   # 距上次使用超过 TTL → 过期清掉
+            _SQG_CACHE.pop(key, None)
+            return None
+        _SQG_CACHE[key] = (compiled_at, now, sqg)  # 被使用 → 重置计时（滞动过期）
+        return (compiled_at, sqg)
+
+    # 命中缓存：深拷贝一份返回，打上「SQG 重用」标记并记日志（前端据此显示标记）。
+    def _reuse(self, hit: tuple, ctx: Optional[ExecContext]) -> SQG:
+        compiled_at, sqg = hit
+        out = copy.deepcopy(sqg)
+        age = int(time.time() - compiled_at)
+        out.context["sqg_reused"] = True
+        out.context["cache_age_s"] = age
+        out.context.pop("recompiled", None)   # 复用不是重编译，清掉可能误导的标记
+        out.context.pop("attempts", None)
+        if ctx is not None:
+            ctx.stage_logs["sqg_reused"] = True
+            ctx.stage_logs["cache"] = {"reused": True, "age_s": age, "ttl_s": _SQG_CACHE_TTL_S}
+        return out
 
     def _compile_llm(self, question: str, ctx: Optional[ExecContext] = None) -> SQG:
         concepts = self.ontology.list_concepts()

@@ -148,25 +148,34 @@
     </g>
     <text x="653" y="400" fill="#8aa0b8" font-size="13" text-anchor="middle">SQG</text>
     <text x="893" y="400" fill="#8aa0b8" font-size="13" text-anchor="middle">PEP</text>
-    <rect x="70" y="500" width="1460" height="160" rx="14" fill="#14281f" stroke="#34D399"/>
-    <text x="95" y="534" fill="#34D399" font-size="21" font-weight="700">⑦ 能力层 · Resolver（真实源 / 智能体 / 动作）—— 系统能做什么、从哪取（静态）</text>
+    <!-- 缓存复用（优化）：初始化器 + 编译器 -->
     <g>
-      <rect x="95" y="552" width="440" height="88" rx="10" fill="#1C2A42" stroke="#4FACFE"/>
-      <text x="115" y="588" fill="#4FACFE" font-size="19" font-weight="700">数据源 Resolver</text>
-      <text x="115" y="618" fill="#B0BEC5" font-size="18">SQL 库 / 文件 / 向量库</text>
-      <rect x="560" y="552" width="440" height="88" rx="10" fill="#33251A" stroke="#FB923C"/>
-      <text x="580" y="588" fill="#FB923C" font-size="19" font-weight="700">Agent Resolver</text>
-      <text x="580" y="618" fill="#B0BEC5" font-size="18">Data Agent 问答 / 归因</text>
-      <rect x="1025" y="552" width="480" height="88" rx="10" fill="#251C3A" stroke="#A78BFA"/>
-      <text x="1045" y="588" fill="#A78BFA" font-size="19" font-weight="700">动作 Resolver</text>
-      <text x="1045" y="618" fill="#B0BEC5" font-size="18">写回 / 派单 / 审批</text>
+      <line x1="320" y1="416" x2="320" y2="384" stroke="#22D3EE" stroke-width="1.5" stroke-dasharray="5 4"/>
+      <line x1="547" y1="416" x2="547" y2="384" stroke="#22D3EE" stroke-width="1.5" stroke-dasharray="5 4"/>
+      <rect x="60" y="418" width="560" height="82" rx="10" fill="#102a30" stroke="#22D3EE" stroke-width="1.5" stroke-dasharray="5 4"/>
+      <text x="78" y="442" fill="#22D3EE" font-size="14" font-weight="700">缓存 · 优化（1 小时内命中即复用，跳过重复计算）</text>
+      <text x="78" y="466" fill="#9fdce6" font-size="13.5">· 初始化器：候选本体相同 → 复用上次选中本体，跳过路由</text>
+      <text x="78" y="488" fill="#9fdce6" font-size="13.5">· 编译器：同一问题 + 同一本体 → 复用上次 SQG，跳过重编译</text>
+    </g>
+    <rect x="70" y="540" width="1460" height="160" rx="14" fill="#14281f" stroke="#34D399"/>
+    <text x="95" y="574" fill="#34D399" font-size="21" font-weight="700">⑦ 能力层 · Resolver（真实源 / 智能体 / 动作）—— 系统能做什么、从哪取（静态）</text>
+    <g>
+      <rect x="95" y="592" width="440" height="88" rx="10" fill="#1C2A42" stroke="#4FACFE"/>
+      <text x="115" y="628" fill="#4FACFE" font-size="19" font-weight="700">数据源 Resolver</text>
+      <text x="115" y="658" fill="#B0BEC5" font-size="18">SQL 库 / 文件 / 向量库</text>
+      <rect x="560" y="592" width="440" height="88" rx="10" fill="#33251A" stroke="#FB923C"/>
+      <text x="580" y="628" fill="#FB923C" font-size="19" font-weight="700">Agent Resolver</text>
+      <text x="580" y="658" fill="#B0BEC5" font-size="18">Data Agent 问答 / 归因</text>
+      <rect x="1025" y="592" width="480" height="88" rx="10" fill="#251C3A" stroke="#A78BFA"/>
+      <text x="1045" y="628" fill="#A78BFA" font-size="19" font-weight="700">动作 Resolver</text>
+      <text x="1045" y="658" fill="#B0BEC5" font-size="18">写回 / 派单 / 审批</text>
     </g>
     <g stroke="#8aa0b8" stroke-width="2" fill="none" stroke-dasharray="6 6">
       <line x1="320" y1="164" x2="320" y2="266" marker-end="url(#bpd)"/>
       <line x1="547" y1="164" x2="547" y2="266" marker-end="url(#bpd)"/>
       <line x1="775" y1="164" x2="775" y2="266" marker-end="url(#bpd)"/>
-      <line x1="775" y1="500" x2="775" y2="382" marker-end="url(#bpd)"/>
-      <line x1="1022" y1="500" x2="1022" y2="382" marker-end="url(#bpd)"/>
+      <line x1="775" y1="540" x2="775" y2="382" marker-end="url(#bpd)"/>
+      <line x1="1022" y1="540" x2="1022" y2="382" marker-end="url(#bpd)"/>
     </g>
     <text x="334" y="205" fill="#8aa0b8" font-size="15">选本体 · RAG 检索</text>
     <text x="560" y="205" fill="#8aa0b8" font-size="15">编译时查 Concept</text>

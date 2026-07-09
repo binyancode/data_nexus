@@ -10,6 +10,7 @@ generator 对等，是引擎的一段；选择/路由过程完整落 run_stage�
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 
 from nexus.core.models import ExecContext
@@ -24,6 +25,11 @@ _logger = get_logger("nexus")
 
 # 自动路由时最多选中的本体数（防下游提示词膨胀）
 _MAX_ONTOLOGIES = 4
+
+# ── 本体路由缓存（进程内）：同一问题 + 同一候选本体集，1 小时内直接复用上次路由结果，跳过 LLM。
+# 滞动过期：每次命中复用都重置 TTL 计时（last_used）。
+_ROUTE_CACHE_TTL_S = 3600
+_ROUTE_CACHE: dict[tuple, tuple[float, float, list]] = {}   # key -> (routed_at, last_used_at, picked_ids)
 
 
 @dataclass
@@ -89,10 +95,21 @@ class Initializer:
                                            "ontology_ids": [onto.ontology_id], "names": [onto.name]}
             return [onto]
         visible = self.repo.list_for_user(ctx.as_user)   # 没选 → LLM 路由（一组）
-        picked_ids, prompt, cand_ids = self._route(ctx.question, visible,
-                                                   self.registry.llm(ctx.llm_name))
-        if prompt:
-            ctx.stage_logs["prompt"] = prompt
+        cand_ids = [o.ontology_id for o in visible]
+        multi = len(cand_ids) > 1                         # 仅多候选的真正路由才缓存/复用
+        key = (ctx.question.strip(), tuple(sorted(cand_ids)))
+        hit = self._route_cache_get(key) if multi else None
+        reused_age = None
+        if hit is not None:                               # 候选相同、1 小时内 → 复用路由结果，跳过 LLM
+            routed_at, picked_ids = hit
+            reused_age = int(time.time() - routed_at)
+        else:
+            picked_ids, prompt, cand_ids = self._route(ctx.question, visible,
+                                                       self.registry.llm(ctx.llm_name))
+            if prompt:
+                ctx.stage_logs["prompt"] = prompt
+            if multi and picked_ids:
+                self._route_cache_put(key, picked_ids)
         ontos = []
         for pid in picked_ids:
             o = self.repo.get(pid)
@@ -100,10 +117,33 @@ class Initializer:
                 ontos.append(o)
         if not ontos:
             raise ValueError("找不到可用（或有权访问）的本体。")
-        ctx.stage_logs["selection"] = {"mode": "auto",
-                                       "ontology_ids": [o.ontology_id for o in ontos],
-                                       "names": [o.name for o in ontos], "candidates": cand_ids}
+        selection = {"mode": "auto",
+                     "ontology_ids": [o.ontology_id for o in ontos],
+                     "names": [o.name for o in ontos], "candidates": cand_ids}
+        if reused_age is not None:                        # 复用标记 + 日志（前端据此显示）
+            selection["reused"] = True
+            selection["cache_age_s"] = reused_age
+            ctx.stage_logs["init_reused"] = True
+            ctx.stage_logs["cache"] = {"reused": True, "age_s": reused_age, "ttl_s": _ROUTE_CACHE_TTL_S}
+        ctx.stage_logs["selection"] = selection
         return ontos
+
+    # ── 路由缓存（滞动过期） ──
+    def _route_cache_get(self, key: tuple):
+        ent = _ROUTE_CACHE.get(key)
+        if ent is None:
+            return None
+        routed_at, last_used, picked = ent
+        now = time.time()
+        if now - last_used > _ROUTE_CACHE_TTL_S:          # 距上次使用超过 TTL → 过期清掉
+            _ROUTE_CACHE.pop(key, None)
+            return None
+        _ROUTE_CACHE[key] = (routed_at, now, picked)      # 被使用 → 重置计时
+        return (routed_at, list(picked))
+
+    def _route_cache_put(self, key: tuple, picked_ids: list) -> None:
+        now = time.time()
+        _ROUTE_CACHE[key] = (now, now, list(picked_ids))
 
     # 从候选本体里选出所有相关的（LLM 按 name + description 判断，可多选）。
     # 返回 (picked_ids: list, prompt|None, candidate_ids)；无 LLM / 单候选时不调模型。

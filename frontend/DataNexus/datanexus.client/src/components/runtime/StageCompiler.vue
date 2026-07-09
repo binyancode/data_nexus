@@ -9,6 +9,7 @@
       <div class="col-arrow">➜</div>
       <div class="col grow">
         <div class="col-h">输出 · SQG（{{ sqgNodes.length }} 节点）
+          <span v-if="reused" class="reuse" :title="reuseText">♻ SQG 重用</span>
           <span v-if="recompiled" class="rc" :title="attemptsText">⟳ 重编译 {{ recompiled }} 次</span>
         </div>
         <div v-if="cerr" class="cerr">⚠ {{ cerr }}</div>
@@ -33,7 +34,7 @@ import { safeParse, operatorColor } from './dag'
 import type { RunStage } from '../../bff/Runs'
 
 interface SqgNode { id: string; operator: string; name?: string; concept?: string }
-type SqgCtx = { intent?: string; recompiled?: number; error?: string; attempts?: Array<{ error?: string; unanswerable?: string }> }
+type SqgCtx = { intent?: string; recompiled?: number; error?: string; attempts?: Array<{ error?: string; unanswerable?: string }>; sqg_reused?: boolean; cache_age_s?: number }
 const props = defineProps<{ stage: RunStage | null }>()
 
 const question = computed(() => safeParse<{ question?: string }>(props.stage?.input)?.question)
@@ -42,6 +43,12 @@ const sqgNodes = computed(() => sqg.value?.nodes ?? [])
 const intent = computed(() => sqg.value?.context?.intent)
 const recompiled = computed(() => sqg.value?.context?.recompiled ?? 0)
 const cerr = computed(() => sqg.value?.context?.error)
+const reused = computed(() => sqg.value?.context?.sqg_reused === true)
+const reuseText = computed(() => {
+  const s = sqg.value?.context?.cache_age_s ?? 0
+  const m = Math.floor(s / 60)
+  return m >= 1 ? `命中编译缓存：复用 ${m} 分钟前编译的 SQG` : `命中编译缓存：复用 ${s} 秒前编译的 SQG`
+})
 const attemptsText = computed(() =>
   (sqg.value?.context?.attempts ?? []).map((a) => a.error || a.unanswerable).filter(Boolean).join(' → '),
 )
@@ -63,6 +70,7 @@ const attemptsText = computed(() =>
 .cc { margin-left: auto; font-size: 11px; color: var(--tech-cyan-dim); font-family: 'Cascadia Code', Consolas, monospace; }
 .muted { color: var(--tech-dim); }
 .rc { margin-left: 8px; font-size: 10px; font-weight: 600; color: #7c5cff; border: 1px solid #cabcff; background: #f2eeff; border-radius: 5px; padding: 1px 6px; cursor: help; }
+.reuse { margin-left: 8px; font-size: 10px; font-weight: 600; color: #0b7f8c; border: 1px solid #7fd6df; background: #e6f9fb; border-radius: 5px; padding: 1px 6px; cursor: help; }
 .cerr { color: #b23; background: #fff2f0; border: 1px solid #ffd0c8; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; white-space: pre-wrap; }
 .err { margin-top: 8px; color: #ffd5d0; white-space: pre-wrap; font-size: 12px; }
 </style>

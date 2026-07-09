@@ -8,7 +8,9 @@
       </div>
       <div class="col-arrow">➜</div>
       <div class="col grow">
-        <div class="col-h">输出 · 选中本体（{{ picked.length }}）</div>
+        <div class="col-h">输出 · 选中本体（{{ picked.length }}）
+          <span v-if="reused" class="reuse" :title="reuseText">♻ 本体复用</span>
+        </div>
         <div v-if="picked.length" class="strip">
           <button v-if="picked.length > 3" class="pg" title="左" @click="scroll(selTrack, -1)">‹</button>
           <div ref="selTrack" class="track">
@@ -57,7 +59,7 @@ const question = computed(() => input.value?.question)
 const requested = computed(() => input.value?.requested_ontology_id || '')
 
 const output = computed(() =>
-  safeParse<{ ontology_ids?: string[]; names?: string[]; selection?: { mode?: string; candidates?: string[] } }>(props.stage?.output),
+  safeParse<{ ontology_ids?: string[]; names?: string[]; selection?: { mode?: string; candidates?: string[]; reused?: boolean; cache_age_s?: number } }>(props.stage?.output),
 )
 const picked = computed(() => {
   const ids = output.value?.ontology_ids ?? []
@@ -67,6 +69,12 @@ const picked = computed(() => {
 const pickedIds = computed(() => picked.value.map((p) => p.ontology_id))
 const mode = computed(() => output.value?.selection?.mode || 'auto')
 const candidates = computed(() => output.value?.selection?.candidates ?? [])
+const reused = computed(() => output.value?.selection?.reused === true)
+const reuseText = computed(() => {
+  const s = output.value?.selection?.cache_age_s ?? 0
+  const m = Math.floor(s / 60)
+  return m >= 1 ? `命中路由缓存：复用 ${m} 分钟前的本体选择` : `命中路由缓存：复用 ${s} 秒前的本体选择`
+})
 </script>
 
 <style scoped>
@@ -94,5 +102,6 @@ const candidates = computed(() => output.value?.selection?.candidates ?? [])
 .cand { flex: 0 0 auto; font-size: 11px; color: var(--tech-dim); border: 1px solid var(--tech-border); border-radius: 6px; padding: 1px 7px; font-family: 'Cascadia Code', Consolas, monospace; white-space: nowrap; }
 .cand.hit { color: var(--tech-text); border-color: var(--tech-cyan); }
 .muted { color: var(--tech-dim); }
+.reuse { margin-left: 8px; font-size: 10px; font-weight: 600; color: #0b7f8c; border: 1px solid #7fd6df; background: #e6f9fb; border-radius: 5px; padding: 1px 6px; cursor: help; }
 .err { margin-top: 8px; color: #ffd5d0; white-space: pre-wrap; font-size: 12px; }
 </style>
