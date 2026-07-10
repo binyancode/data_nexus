@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import time
@@ -69,7 +70,22 @@ class Compiler:
         ))
         # 算子集也纳入 key：同问题同本体，但可用算子不同会编出不同 SQG
         ops = tuple(sorted(self.available_ops)) if self.available_ops is not None else ()
-        return ((question or "").strip(), onto_ids, ops)
+        # 本体内容指纹：本体一改（概念/属性/关系/口径变了）指纹就变 → 缓存自动失效、触发重编
+        return ((question or "").strip(), onto_ids, ops, self._onto_fingerprint())
+
+    def _onto_fingerprint(self) -> str:
+        """作用域本体内容指纹（概念 id/类型/名/语义/同义词/attrs）；任一变化都会改变指纹，
+        使旧 SQG 缓存失效（避免更新本体后仍复用旧计划）。"""
+        h = hashlib.md5()
+        for c in sorted(self.ontology.list_concepts(), key=lambda x: x.id):
+            payload = json.dumps({
+                "id": c.id, "kind": str(c.kind), "name": c.name or "",
+                "semantics": c.semantics or "", "synonyms": sorted(c.synonyms or []),
+                "attrs": c.attrs or {},
+            }, sort_keys=True, ensure_ascii=False, default=str)
+            h.update(payload.encode("utf-8"))
+            h.update(b"\n")
+        return h.hexdigest()
 
     def _cache_get(self, key: tuple) -> Optional[tuple]:
         ent = _SQG_CACHE.get(key)
@@ -186,13 +202,14 @@ class Compiler:
             '  {"id":"n7","operator":"AGGREGATE","name":"产品种类数(去重计数)","concept":null,"params":{"measure":"<维度attribute id>","agg":"COUNT","distinct":true,"filters":[]},"depends_on":[]}',
         ]
         if has_ask:
-            ex_nodes.append('  {"id":"n6","operator":"ASK","name":"结果分析","concept":null,"params":{"prompt":"以下是查询结果：{n3}。请用中文分析并给出简明结论。"},"depends_on":["n3"]}')
+            ex_nodes.append('  {"id":"n8","operator":"ASK","name":"结果分析","concept":null,"params":{"prompt":"以下是查询结果：{n3}。请用中文分析并给出简明结论。"},"depends_on":["n3"]}')
         if has_act:
-            ex_nodes.append('  {"id":"n7","operator":"ACT","name":"建复盘任务","concept":null,"params":{"desc":"复盘：{n6}","assignee":"华东"},"depends_on":["n6"]}')
+            ex_nodes.append('  {"id":"n9","operator":"ACT","name":"建复盘任务","concept":null,"params":{"desc":"复盘：{n8}","assignee":"华东"},"depends_on":["n8"]}')
 
         rules = [
             "- 每个要对比/分析的数值都拆成**独立的 AGGREGATE 节点**，不要把多个地区或多个指标塞进一个节点。",
             "- AGGREGATE 取数二选一：①有合适的预定义指标 → concept 填指标 id；②没有 → 用「临时聚合」：concept=null，params 给 measure（某个**度量** attribute id）+ agg（SUM/AVG/MIN/MAX/COUNT）。",
+            "- 业务度量词（如 毛利/销售额/成本/利润/数量/单价 等）若没有同名『指标(metric)』，**必看『度量』清单**：按 name/同义词匹配到某个**度量 attribute**（如「毛利」→ 名为「毛利」的度量属性），用临时聚合(SUM/AVG/…)取数；**别因为没有同名 metric 就判缺失。**",
             "- **列出/枚举**某维度的所有取值（如「列出所有产品」「有哪些地区」「都有哪些客户」）→ AGGREGATE：concept=null，params 只给 group_by=该**维度** attribute id，**不要 measure/agg**（系统按 DISTINCT 去重列出，可带 filters/order/limit）。",
             "- **去重计数**（如「有多少**种**产品」「多少个**不同的**客户」「去重后多少个」）→ 临时聚合 COUNT 且加 distinct:true（即 COUNT(DISTINCT ...)）：concept=null、measure=该维度 attribute id、agg=COUNT、distinct=true。问「多少条/多少行/总记录数」才用不带 distinct 的普通 COUNT。",
             "- 聚合函数受**可加性**约束：additive 可 SUM/AVG/MIN/MAX；semi_additive 跨时间维度别 SUM（用 AVG 或不按时间分组）；non_additive（比率/百分比/单价）**禁 SUM**，用 AVG 或直接取。SUM/AVG 只能用于 number 类型的度量。",
@@ -214,6 +231,7 @@ class Compiler:
             chain += " → 行动(ACT)"
         rules.append(f"- concept（指标/维度/度量）必须是上面清单里的 id。只用问题真正需要的节点；形成「{chain}」的依赖链。")
         rules.append("- **一个取数节点内引用的所有概念（指标/度量/维度/过滤）必须能靠上面的『实体间关系』连通」（直接或经中间维表间接）；同一术语有多个候选时，选能和本节点其它概念连通的那个。互不关联的量（如不同事实表）拆成**独立节点**、用 ASK 综合，别塞进一个节点。")
+        rules.append("- 报 missing_concept 前**务必先核对**：把问题里每个业务词，在上面『维度 / 度量 / 指标』清单里按 **name 和同义词** 逐一比对；只要有名称/同义词匹配的概念就用它，不要误报缺失（尤其度量词优先在『度量』里找）。")
         rules.append("- 若无法用现有概念/关系回答，**不要硬凑**；输出 {\"nodes\":[],\"compile_errors\":[{kind,concepts,detail?}...]}，原因可多条。判定："
                      "① 所需概念在清单里**存在但彼此无关系、无法关联** → kind=no_relation，把这些**已存在**的概念 id 全部放进 concepts；"
                      "② 概念**根本不在清单里**（本体压根没有）→ kind=missing_concept，detail 写缺的业务名。"
