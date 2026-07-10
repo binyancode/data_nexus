@@ -27,13 +27,48 @@ def _dumps(obj) -> str:
 
 
 def _result_value(res: NodeResult):
-    """节点的代表值：首行的 value 列（或首个值）；无行则取 output。"""
+    """节点的代表值：首行的 value 列（或首个值）；无行则取 output。仅用于「短预览」。"""
     if res is None:
         return None
     if res.rows:
         first = res.rows[0]
         return first.get("value", next(iter(first.values()), None))
     return res.output
+
+
+_MAX_BACKFILL_ROWS = 200
+
+
+def _cell(v) -> str:
+    return "" if v is None else str(v)
+
+
+def _render_result(res: NodeResult) -> str:
+    """把一个节点结果**完整**渲染成给下游 prompt 用的文本（供 {nX} 回填）：
+    - 无行 → output 文本；
+    - 单行单列 → 标量值；
+    - 多行 → 逐行序列化（label: value / value / k=v），别只给第一行。
+    行数过多时截断，避免撑爆提示词。"""
+    if res is None:
+        return ""
+    rows = res.rows or []
+    if not rows:
+        return "" if res.output is None else str(res.output)
+    if len(rows) == 1 and len(rows[0]) == 1:
+        return _cell(next(iter(rows[0].values())))
+
+    def fmt_row(r: dict) -> str:
+        if "label" in r and "value" in r:
+            return f"{r.get('label')}: {_cell(r.get('value'))}"
+        if set(r.keys()) == {"value"}:
+            return _cell(r.get("value"))
+        return ", ".join(f"{k}={_cell(v)}" for k, v in r.items())
+
+    shown = rows[:_MAX_BACKFILL_ROWS]
+    body = "；".join(fmt_row(r) for r in shown)
+    if len(rows) > len(shown):
+        body += f"；…（共 {len(rows)} 行，仅列出前 {len(shown)} 行）"
+    return body
 
 
 class Coordinator:
@@ -116,11 +151,16 @@ class Coordinator:
         value = _result_value(res)
         # 自定义日志：取数类节点额外记 resolver 返回的行数
         node_logs = dict(res.logs) if res.logs else {}
+        n_rows = len(res.rows) if isinstance(res.rows, list) else 0
         if node.operator not in (Operator.ASK, Operator.ACT) and isinstance(res.rows, list):
-            node_logs["row_count"] = len(res.rows)
+            node_logs["row_count"] = n_rows
+        # 值预览：多行结果标注总条数，避免只显示第一行让人误以为只有一条
+        preview = None if value is None else str(value)[:200]
+        if preview is not None and n_rows > 1:
+            preview = f"{str(value)[:160]} 等 {n_rows} 项"
         ctx.recorder.finish_node(
             ctx.run_id, node.id, state, _dumps(call),
-            _dumps(res.rows), (None if value is None else str(value)[:200]),
+            _dumps(res.rows), preview,
             res.source, res.trust, res.error, int((time.time() - t0) * 1000),
             (_dumps(node_logs) if node_logs else None),
         )
@@ -172,7 +212,7 @@ class Coordinator:
         def sub(v):
             if isinstance(v, str):
                 return _PLACEHOLDER.sub(
-                    lambda m: str(_result_value(results[m.group(1)]))
+                    lambda m: _render_result(results[m.group(1)])
                     if m.group(1) in results else m.group(0),
                     v,
                 )

@@ -182,6 +182,8 @@ class Compiler:
             '  {"id":"n3","operator":"AGGREGATE","name":"订单数量前三的产品","concept":null,"params":{"measure":"<度量attribute id>","agg":"SUM","group_by":"<维度attribute id>","order":"desc","limit":3},"depends_on":[]}',
             '  {"id":"n4","operator":"AGGREGATE","name":"总销量超1000的产品","concept":null,"params":{"measure":"<度量attribute id>","agg":"SUM","group_by":"<维度attribute id>","having":{"op":">","value":1000},"order":"desc"},"depends_on":[]}',
             '  {"id":"n5","operator":"AGGREGATE","name":"2024年7月销售额","concept":null,"params":{"measure":"<度量attribute id>","agg":"SUM","filters":[{"concept":"<date类型attribute id>","op":">=","value":"2024-07-01","value_format":"yyyy-MM-dd"},{"concept":"<date类型attribute id>","op":"<","value":"2024-08-01","value_format":"yyyy-MM-dd"}]},"depends_on":[]}',
+            '  {"id":"n6","operator":"AGGREGATE","name":"所有产品(去重列举)","concept":null,"params":{"group_by":"<维度attribute id>","order":"asc"},"depends_on":[]}',
+            '  {"id":"n7","operator":"AGGREGATE","name":"产品种类数(去重计数)","concept":null,"params":{"measure":"<维度attribute id>","agg":"COUNT","distinct":true,"filters":[]},"depends_on":[]}',
         ]
         if has_ask:
             ex_nodes.append('  {"id":"n6","operator":"ASK","name":"结果分析","concept":null,"params":{"prompt":"以下是查询结果：{n3}。请用中文分析并给出简明结论。"},"depends_on":["n3"]}')
@@ -191,6 +193,8 @@ class Compiler:
         rules = [
             "- 每个要对比/分析的数值都拆成**独立的 AGGREGATE 节点**，不要把多个地区或多个指标塞进一个节点。",
             "- AGGREGATE 取数二选一：①有合适的预定义指标 → concept 填指标 id；②没有 → 用「临时聚合」：concept=null，params 给 measure（某个**度量** attribute id）+ agg（SUM/AVG/MIN/MAX/COUNT）。",
+            "- **列出/枚举**某维度的所有取值（如「列出所有产品」「有哪些地区」「都有哪些客户」）→ AGGREGATE：concept=null，params 只给 group_by=该**维度** attribute id，**不要 measure/agg**（系统按 DISTINCT 去重列出，可带 filters/order/limit）。",
+            "- **去重计数**（如「有多少**种**产品」「多少个**不同的**客户」「去重后多少个」）→ 临时聚合 COUNT 且加 distinct:true（即 COUNT(DISTINCT ...)）：concept=null、measure=该维度 attribute id、agg=COUNT、distinct=true。问「多少条/多少行/总记录数」才用不带 distinct 的普通 COUNT。",
             "- 聚合函数受**可加性**约束：additive 可 SUM/AVG/MIN/MAX；semi_additive 跨时间维度别 SUM（用 AVG 或不按时间分组）；non_additive（比率/百分比/单价）**禁 SUM**，用 AVG 或直接取。SUM/AVG 只能用于 number 类型的度量。",
             "- filters：维度和度量都可过滤，元素为 {concept, op, value}；op ∈ = != > >= < <= like in（默认 =）；维度常用等值，度量常用比较（如 amount > 1000）。in 的 value 是数组。",
             "- group_by 只能用**维度** attribute id；排名/TopN 用 group_by + order(desc/asc) + limit。",

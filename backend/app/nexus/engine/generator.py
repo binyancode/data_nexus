@@ -33,23 +33,33 @@ class Generator:
                 parts.append(f"{node.name}：取数失败（{res.error}）")
                 continue
 
-            # 排名/分组结果：多行 label + value
-            if res.rows and "label" in res.rows[0]:
-                ranked = [(r.get("label"), _norm(r.get("value"))) for r in res.rows]
+            kind = node.result_kind()
+
+            # 分组/排名：多行 label + value
+            if kind == "ranking":
+                ranked = [(r.get("label"), _norm(r.get("value"))) for r in (res.rows or [])]
                 listed = "、".join(f"{lbl}({val})" for lbl, val in ranked)
                 parts.append(f"{node.name}：{listed}")
                 data_nodes.append({"node_id": node.id, "name": node.name,
                                    "items": [{"label": l, "value": v} for l, v in ranked]})
                 lineage.append(LineageItem(
-                    node_id=node.id,
-                    label=node.name,
-                    value=listed,
-                    resolver=res.resolver,
-                    source=res.source,
-                    detail=res.detail,
-                ))
+                    node_id=node.id, label=node.name, value=listed,
+                    resolver=res.resolver, source=res.source, detail=res.detail))
                 continue
 
+            # 维度去重列举：多行、只有 value（如「列出所有产品」）——逐个列出
+            if kind == "list":
+                vals = [_norm(r.get("value", next(iter(r.values()), None))) for r in (res.rows or [])]
+                listed = "、".join("" if v is None else str(v) for v in vals)
+                parts.append(f"{node.name}（{len(vals)}）：{listed}")
+                data_nodes.append({"node_id": node.id, "name": node.name,
+                                   "items": [{"value": v} for v in vals]})
+                lineage.append(LineageItem(
+                    node_id=node.id, label=node.name, value=listed,
+                    resolver=res.resolver, source=res.source, detail=res.detail))
+                continue
+
+            # 单值 / 文本(ASK) / 动作(ACT)
             value = None
             if res.rows:
                 first = res.rows[0]

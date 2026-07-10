@@ -133,7 +133,15 @@ class CsvResolver(Resolver):
         params: list = []
         where = [self._cond(f, params) for f in spec.filters]
 
-        if spec.label_expr:
+        if spec.label_expr and not spec.value_expr:
+            # 纯列举维度（去重）：SELECT DISTINCT 维度
+            sql = f"SELECT DISTINCT {spec.label_expr} AS value FROM {from_sql}"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += f" ORDER BY value {spec.order}"
+            if spec.limit:
+                sql += f" LIMIT {int(spec.limit)}"
+        elif spec.label_expr:
             sql = f"SELECT {spec.label_expr} AS label, {spec.value_expr} AS value FROM {from_sql}"
             if where:
                 sql += " WHERE " + " AND ".join(where)

@@ -85,6 +85,18 @@ class SQGNode(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)  # 过滤/分组/聚合等参数
     depends_on: list[str] = Field(default_factory=list)
 
+    def result_kind(self) -> str:
+        """结果形态（据算子 + 参数判定，供优化器/生成器统一分派，避免按行结构猜）：
+        text(ASK) / action(ACT) / list(维度去重列举) / ranking(分组多行) / scalar(单值)。"""
+        if self.operator == Operator.ASK:
+            return "text"
+        if self.operator == Operator.ACT:
+            return "action"
+        p = self.params or {}
+        if p.get("group_by"):
+            return "ranking" if (p.get("measure") or self.concept) else "list"
+        return "scalar"
+
 
 class SQG(BaseModel):
     """语义查询图：一次提问翻成的统一查询指令（nodes + context）。"""

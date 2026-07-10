@@ -51,6 +51,9 @@ class Optimizer:
         for n in sqg.nodes:
             if n.id not in first_ids:
                 continue
+            if self._is_list_node(n):               # 纯列举维度：不参与聚合融合，单独规划
+                nodes.append(self._plan_aggregate(n, ctx))
+                continue
             if self._is_cross_source(n):            # 跨源：分解成 fetch + join + 聚合
                 nodes += self._plan_cross_source(n, sqg, ctx)
                 continue
@@ -92,6 +95,11 @@ class Optimizer:
         return None
 
     # ── AGGREGATE → 下推 SQL ──
+    @staticmethod
+    def _is_list_node(node) -> bool:
+        """纯列举：无指标、无度量，只给 group_by 维度 → 去重列出该维度的所有取值。"""
+        return node.result_kind() == "list"
+
     def _plan_aggregate(self, node, ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
         ok, reason = self._agg_spec(node)
         if not ok:
@@ -310,6 +318,24 @@ class Optimizer:
 
     # 解析一个 AGGREGATE 节点 → ((QuerySpec, resolver) | None, reason)；不编译（供融合先分组）
     def _agg_spec(self, node):
+        if self._is_list_node(node):                 # 纯列举维度（去重），无聚合函数
+            order = (node.params.get("order") or "asc").lower()
+            order = "DESC" if order == "desc" else "ASC"
+            try:
+                limit = int(node.params["limit"]) if node.params.get("limit") is not None else None
+            except (TypeError, ValueError):
+                limit = None
+            rank = {"group_by": node.params.get("group_by"), "order": order,
+                    "limit": limit, "having": None}
+            resolved = self._resolve_attr_aggregate("", node.params.get("filters", []), rank)
+            if isinstance(resolved, str):
+                return None, resolved
+            if resolved is None:
+                return None, "无法解析列举维度"
+            spec, resolver = resolved
+            if not self._allowed(resolver):
+                return None, f"数据源不在本体允许集：{resolver}"
+            return (spec, resolver), None
         expr = self._aggregate_expr(node)
         if not expr:
             return None, "无法确定聚合口径（需要有效的指标或度量属性）"
@@ -509,6 +535,8 @@ class Optimizer:
             if mc.attrs.get("additivity") == "non_additive" and agg == "SUM":
                 return None   # 比率/百分比等不可加：禁 SUM
         # MIN/MAX/COUNT：对任意属性（数值/日期/文本/维度）都合法，不要求 role=measure
+        if agg == "COUNT" and node.params.get("distinct"):
+            return f"COUNT(DISTINCT {measure})"   # 去重计数（有多少种/多少个不同的 X）
         return f"{agg}({measure})"
 
     def _clean_having(self, having):
@@ -522,10 +550,11 @@ class Optimizer:
             return None
         return {"op": op, "value": having.get("value")}
 
-    # 属性表达式 → SQL（多实体自动 JOIN）
+    # 属性表达式 → SQL（多实体自动 JOIN）；expr 为空 = 列举模式（只出 group_by 维度，无聚合）
     def _resolve_attr_aggregate(self, expr: str, filters: list, rank: Optional[dict] = None):
-        tokens = list(dict.fromkeys(_ATTR_TOKEN.findall(expr)))
-        if not tokens:
+        list_mode = not expr
+        tokens = list(dict.fromkeys(_ATTR_TOKEN.findall(expr))) if expr else []
+        if not list_mode and not tokens:
             return "聚合表达式里没有可解析的属性"
         info: dict[str, tuple[str, str]] = {}     # attr_id -> (entity_id, column)
         ent_order: list[str] = []
