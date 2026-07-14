@@ -4,7 +4,7 @@ import { MarkerType, type Edge, type Node } from '@vue-flow/core'
 // 运行完成时 NexusRuntime 向外抛出的最终答案
 export interface RuntimeAnswer {
   text: string
-  lineage: { label: string; value: unknown; source: string }[]
+  lineage: { label: string; value: unknown; source: string; detail?: string }[]
 }
 
 export interface DagNodeIn {
@@ -114,6 +114,10 @@ export function operatorColor(op?: string | null): string {
       return '#00859b'
     case 'JOIN':
       return '#6a5acd'
+    case 'SEARCH':
+      return '#168aad'
+    case 'BROWSE':
+      return '#277da1'
     case 'ASK':
       return '#e97600'
     case 'ACT':

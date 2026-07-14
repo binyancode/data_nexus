@@ -20,7 +20,7 @@ from typing import Optional
 from nexus.core.models import SQG, SQGNode, Operator, ConceptKind, ExecContext
 from nexus.engine.relations import connected
 
-_ALLOWED_OPS = {"AGGREGATE", "ASK", "ACT", "SELECT", "FILTER", "JOIN"}
+_ALLOWED_OPS = {"AGGREGATE", "SEARCH", "BROWSE", "ASK", "ACT", "SELECT", "FILTER", "JOIN"}
 # 指标口径表达式里引用属性概念的记号，如 attribute.sales.amount（可带本体命名空间前缀 onto_x::）
 _ATTR_TOKEN = re.compile(r"(?:[A-Za-z0-9_]+::)?attribute(?:\.[A-Za-z0-9_]+)+")
 # 任意概念 id 记号（entity/attribute/metric/relation，可带 onto_x:: 前缀）——用于把误入自由文本的 id 换成友好名
@@ -121,9 +121,12 @@ class Compiler:
         derivations = [c for c in concepts if c.kind == ConceptKind.derivation]
         actions = [c for c in concepts if c.kind == ConceptKind.action]
         relations = [c for c in concepts if c.kind == ConceptKind.relation]
-        # 临时聚合让 metric 变可选：只要有实体（带度量属性）即可取数；空本体才拒绝
-        if not entities and not metrics:
-            return self._fail(question, "本体没有实体或指标")
+        # 数据本体需有实体/指标；纯能力本体（Web IQ / Agent / Action）即使没有实体也可工作。
+        capability_only = self.available_ops is not None and bool(
+            self.available_ops & {"SEARCH", "BROWSE", "ASK", "ACT"}
+        )
+        if not entities and not metrics and not capability_only:
+            return self._fail(question, "本体没有实体、指标或可用能力")
 
         # 按实体列出维度 / 度量（带粗类型 dtype、度量带可加性 additivity）
         attrs_by_entity: dict[str, list] = {}
@@ -171,8 +174,14 @@ class Compiler:
         # 派生/动作概念是"可选的具名模板"，没有也能用自由 prompt 的 ASK。
         has_ask = self._op_available("ASK")
         has_act = self._op_available("ACT")
+        has_search = self._op_available("SEARCH")
+        has_browse = self._op_available("BROWSE")
 
         op_lines = ["- AGGREGATE：对某个度量取一个数或分组取一组数。既可用预定义指标(metric)，也可临时对某个度量列聚合。"]
+        if has_search:
+            op_lines.append("- SEARCH：搜索公开 Web 信息，params.query 填搜索语句；用于最新/实时/新闻/网上资料等本体数据无法覆盖的问题。")
+        if has_browse:
+            op_lines.append("- BROWSE：读取一个明确的 http/https URL，params.url 填原始网址；用于打开、读取、提取或总结指定网页。")
         if has_ask:
             op_lines.append("- ASK：把上游若干节点的数值交给分析 Agent，做对比 / 归因 / 解释，产出一段结论文字。")
         if has_act:
@@ -201,10 +210,24 @@ class Compiler:
             '  {"id":"n6","operator":"AGGREGATE","name":"所有产品(去重列举)","concept":null,"params":{"group_by":"<维度attribute id>","order":"asc"},"depends_on":[]}',
             '  {"id":"n7","operator":"AGGREGATE","name":"产品种类数(去重计数)","concept":null,"params":{"measure":"<维度attribute id>","agg":"COUNT","distinct":true,"filters":[]},"depends_on":[]}',
         ]
+        next_ex_id = 8
+        if has_search:
+            nid = f"n{next_ex_id}"
+            next_ex_id += 1
+            ex_nodes.append(f'  {{"id":"{nid}","operator":"SEARCH","name":"搜索最新RAG趋势","concept":null,"params":{{"query":"latest trends in LLM RAG","max_results":10}},"depends_on":[]}}')
+        if has_browse:
+            nid = f"n{next_ex_id}"
+            next_ex_id += 1
+            ex_nodes.append(f'  {{"id":"{nid}","operator":"BROWSE","name":"读取指定网页","concept":null,"params":{{"url":"https://example.com/article"}},"depends_on":[]}}')
+        ask_id = None
         if has_ask:
-            ex_nodes.append('  {"id":"n8","operator":"ASK","name":"结果分析","concept":null,"params":{"prompt":"以下是查询结果：{n3}。请用中文分析并给出简明结论。"},"depends_on":["n3"]}')
+            ask_id = f"n{next_ex_id}"
+            next_ex_id += 1
+            ex_nodes.append(f'  {{"id":"{ask_id}","operator":"ASK","name":"结果分析","concept":null,"params":{{"prompt":"以下是查询结果：{{n3}}。请用中文分析并给出简明结论。"}},"depends_on":["n3"]}}')
         if has_act:
-            ex_nodes.append('  {"id":"n9","operator":"ACT","name":"建复盘任务","concept":null,"params":{"desc":"复盘：{n8}","assignee":"华东"},"depends_on":["n8"]}')
+            nid = f"n{next_ex_id}"
+            dep = ask_id or "n3"
+            ex_nodes.append(f'  {{"id":"{nid}","operator":"ACT","name":"建复盘任务","concept":null,"params":{{"desc":"复盘：{{{dep}}}","assignee":"华东"}},"depends_on":["{dep}"]}}')
 
         rules = [
             "- 每个要对比/分析的数值都拆成**独立的 AGGREGATE 节点**，不要把多个地区或多个指标塞进一个节点。",
@@ -220,6 +243,12 @@ class Compiler:
             "- 每个 date 类型的过滤都要带 value_format 字段说明 value 的格式（用完整日期 'yyyy-MM-dd'）。文本型维度用等值、不需要 value_format。",
             "- 属性若带「描述」，按描述理解其含义与**取值格式**（如字符串型期间列的格式），过滤 value 按该格式生成，不要臆造。",
         ]
+        if has_search:
+            rules.append("- 用户要求搜索公开 Web 信息，或问题强调『最新/最近/当前/新闻/网上/互联网/公开资料』且本体数据无法回答时，用 SEARCH：params.query 写完整搜索语句；不要用 ASK 冒充搜索。")
+        if has_browse:
+            rules.append("- 用户给出明确 http/https URL 并要求打开/读取/提取/总结网页时，用 BROWSE：params.url 必须原样保留该 URL；不要把 URL 当 SEARCH query。")
+        if has_ask and (has_search or has_browse):
+            rules.append("- 用户还要求总结/分析 Web 结果时，建立 SEARCH/BROWSE → ASK：ASK.depends_on 指向 Web 节点，prompt 用 {nX} 引用其完整结果。")
         if has_ask:
             rules.append("- 只要用户意图含「分析/为什么/对比/归因/解读」等，就**必须**加一个 ASK 节点：depends_on 指向相关 AGGREGATE，params.prompt 用 {nX} 回填上游结果并要求给出结论；concept 可选（有具名分析能力就填其 id，否则用 null）。")
         if has_act:
@@ -241,6 +270,10 @@ class Compiler:
 
         # 强意图拆解指令：多意图问题必须逐句建节点，别漏 ASK/ACT
         intent_hints = []
+        if has_search:
+            intent_hints.append("『搜索 / 最新 / 新闻 / 网上资料 / 互联网信息』→ SEARCH 节点")
+        if has_browse:
+            intent_hints.append("『打开 / 读取 / 提取 / 总结某个明确 URL』→ BROWSE 节点")
         if has_ask:
             intent_hints.append("「分析 / 为什么 / 对比 / 归因 / 解读 / 说明」→ 必须建 ASK 节点")
         if has_act:
@@ -388,7 +421,7 @@ class Compiler:
             if not nid or op not in _ALLOWED_OPS:
                 continue
             # 本体无对应能力时，丢弃该算子节点（安全网，防 LLM 越权生成）
-            if op in ("ASK", "ACT") and not self._op_available(op):
+            if op in ("SEARCH", "BROWSE", "ASK", "ACT") and not self._op_available(op):
                 continue
             params = dict(rn.get("params") or {})
             if op == "AGGREGATE":
@@ -409,6 +442,12 @@ class Compiler:
         #  ① 存在性：引用的 concept/measure/group_by/filter 必须在本体里、且类型对。
         #  ② 连通性：跨多实体的聚合，这些实体必须能靠 relation 直接/间接连通。
         for n in nodes:
+            if n.operator == Operator.SEARCH and not str(n.params.get("query") or "").strip():
+                return sqg, {"kind": "invalid_params", "detail": "SEARCH 缺少 query"}
+            if n.operator == Operator.BROWSE:
+                url = str(n.params.get("url") or "").strip()
+                if not url.lower().startswith(("http://", "https://")):
+                    return sqg, {"kind": "invalid_params", "detail": "BROWSE 缺少有效的 http/https URL"}
             if n.operator != Operator.AGGREGATE:
                 continue
             reason = self._check_refs(n)

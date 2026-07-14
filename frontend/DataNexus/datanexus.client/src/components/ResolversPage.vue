@@ -42,6 +42,7 @@
           <el-option value="sql" label="SQL 数据源" />
           <el-option value="csv" label="CSV（本地文件）" />
           <el-option value="agent" label="Agent（LLM）" />
+          <el-option value="web_iq" label="Web IQ（搜索 + 网页浏览）" />
           <el-option value="action" label="Action（动作）" />
         </el-select>
       </div>
@@ -83,7 +84,10 @@ import {
 import { listCredentials, type CredentialListItem } from '../bff/Credentials.js'
 import { reloadRegistry } from '../backend/Registry.js'
 
-const TYPE_LABELS: Record<string, string> = { sql: 'SQL 数据源', csv: 'CSV（本地文件）', agent: 'Agent（LLM）', action: 'Action（动作）' }
+const TYPE_LABELS: Record<string, string> = {
+  sql: 'SQL 数据源', csv: 'CSV（本地文件）', agent: 'Agent（LLM）',
+  web_iq: 'Web IQ（搜索 + 网页浏览）', action: 'Action（动作）',
+}
 
 const items = ref<ResolverAdminItem[]>([])
 const creds = ref<CredentialListItem[]>([])

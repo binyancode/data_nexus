@@ -57,14 +57,43 @@
           <el-icon class="answer-icon"><Opportunity /></el-icon>
           <span class="answer-label">答案</span>
         </div>
-        <p class="answer-text">{{ answerText }}</p>
+        <MarkdownContent class="answer-text" :content="answerText" />
 
         <div class="lineage-grid">
-          <div v-for="(item, i) in lineage" :key="i" class="lineage-card">
-            <div class="lineage-name">{{ item.label }}</div>
-            <div class="lineage-value">{{ item.value }}</div>
+          <div
+            v-for="(item, i) in lineage"
+            :key="i"
+            class="lineage-card"
+            :class="{ expanded: expandedLineage === i }"
+            tabindex="0"
+            role="button"
+            :aria-expanded="expandedLineage === i"
+            @click="toggleLineage(i)"
+            @keydown.enter.prevent="toggleLineage(i)"
+            @keydown.space.prevent="toggleLineage(i)"
+          >
+            <button
+              class="lineage-toggle"
+              type="button"
+              :title="expandedLineage === i ? '收起完整信息' : '展开完整信息'"
+              @click.stop="toggleLineage(i)"
+            >{{ expandedLineage === i ? '收起' : '展开' }}</button>
+            <div class="lineage-name" :title="item.label">{{ item.label }}</div>
+            <MarkdownContent
+              v-if="!sameLineageUrl(item) && hasMarkdown(item.value)"
+              class="lineage-value lineage-markdown"
+              :content="item.value"
+              compact
+            />
+            <div v-else-if="!sameLineageUrl(item)" class="lineage-value" :class="{ 'is-url': isUrl(item.value) }">
+              <a v-if="isUrl(item.value)" :href="item.value" target="_blank" rel="noopener noreferrer" @click.stop>{{ item.value }}</a>
+              <template v-else>{{ item.value }}</template>
+            </div>
+            <div v-if="item.detail" class="lineage-detail">{{ item.detail }}</div>
             <div class="lineage-source">
-              <el-icon><Coin /></el-icon>{{ item.source }}
+              <el-icon><Coin /></el-icon>
+              <a v-if="isUrl(item.source)" :href="item.source" target="_blank" rel="noopener noreferrer" @click.stop>{{ item.source }}</a>
+              <span v-else>{{ item.source }}</span>
             </div>
           </div>
         </div>
@@ -105,18 +134,33 @@ import { ask } from '../backend/Ask.js'
 import { listOntologies, type OntologyMeta } from '../bff/Ontology.js'
 import { listLlms, type LlmItem } from '../bff/Llms.js'
 import NexusRuntime from './runtime/NexusRuntime.vue'
+import MarkdownContent from './common/MarkdownContent.vue'
 import type { RuntimeAnswer } from './runtime/dag'
 
 interface Cell {
   label: string
   value: string
   source: string
+  detail: string
+}
+
+function isUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value || '')
+}
+
+function sameLineageUrl(item: Cell): boolean {
+  return isUrl(item.value) && item.value === item.source
+}
+
+function hasMarkdown(value: string): boolean {
+  return /(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|\|.+\||```)|\*\*[^*]+\*\*|__[^_]+__/m.test(value || '')
 }
 
 const question = ref('')
 const loading = ref(false)
 const answerText = ref('')
 const lineage = ref<Cell[]>([])
+const expandedLineage = ref<number | null>(null)
 const runId = ref<string | null>(null)
 const lastQuestion = ref('')
 const askError = ref('')
@@ -141,6 +185,10 @@ function useExample(ex: string) {
   onAsk()
 }
 
+function toggleLineage(index: number) {
+  expandedLineage.value = expandedLineage.value === index ? null : index
+}
+
 // 异步提问：立即拿 run_id 并展示执行过程；答案由 NexusRuntime 完成时回传
 async function onAsk() {
   const q = question.value.trim()
@@ -148,6 +196,7 @@ async function onAsk() {
   loading.value = true
   answerText.value = ''
   lineage.value = []
+  expandedLineage.value = null
   runId.value = null
   askError.value = ''
   lastQuestion.value = q
@@ -162,11 +211,13 @@ async function onAsk() {
 }
 
 function onRuntimeDone(a: RuntimeAnswer) {
+  expandedLineage.value = null
   answerText.value = a.text
   lineage.value = (a.lineage || []).map((li) => ({
     label: li.label,
     value: li.value == null ? '—' : String(li.value),
     source: li.source,
+    detail: li.detail || '',
   }))
 }
 </script>
@@ -311,27 +362,66 @@ function onRuntimeDone(a: RuntimeAnswer) {
 }
 
 .answer-text {
-  font-size: 16px;
-  color: var(--beone-text-primary);
   margin-bottom: 18px;
 }
 
 .lineage-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
   gap: 12px;
 }
 
 .lineage-card {
+  position: relative;
+  min-width: 0;
+  height: 190px;
+  box-sizing: border-box;
+  overflow: hidden;
   border: 1px solid var(--beone-border);
   border-radius: 8px;
-  padding: 12px 14px;
+  padding: 12px 38px 12px 14px;
   background: var(--beone-bg-panel-muted);
+  transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
 }
+.lineage-card { cursor: pointer; }
+.lineage-card:hover,
+.lineage-card:focus-visible {
+  border-color: color-mix(in srgb, var(--beone-cerulean-blue) 55%, var(--beone-border));
+  box-shadow: 0 5px 14px rgba(26, 67, 105, .09);
+  outline: none;
+}
+.lineage-card.expanded {
+  grid-column: 1 / -1;
+  height: auto;
+  min-height: 190px;
+  overflow: visible;
+  background: var(--beone-bg-panel);
+}
+.lineage-toggle {
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  border: 1px solid color-mix(in srgb, var(--beone-cerulean-blue) 28%, transparent);
+  border-radius: 10px;
+  padding: 1px 7px;
+  background: color-mix(in srgb, var(--beone-cerulean-blue) 8%, #ffffff);
+  color: var(--beone-cerulean-blue);
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.lineage-toggle:hover { background: color-mix(in srgb, var(--beone-cerulean-blue) 14%, #ffffff); }
 
 .lineage-name {
   font-size: 13px;
   color: var(--beone-text-secondary);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 
 .lineage-value {
@@ -339,15 +429,72 @@ function onRuntimeDone(a: RuntimeAnswer) {
   font-weight: 600;
   color: var(--beone-text-primary);
   margin: 4px 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+.lineage-value.is-url { font-size: 14px; line-height: 1.45; }
+.lineage-value.lineage-markdown {
+  display: block;
+  max-height: 84px;
+  font-size: 12px;
+  font-weight: 400;
+  overflow: hidden;
+}
+.lineage-value a, .lineage-source a { color: inherit; text-decoration: none; }
+.lineage-value a:hover, .lineage-source a:hover { text-decoration: underline; }
+
+.lineage-detail {
+  margin: 7px 0;
+  color: var(--beone-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
 }
 
 .lineage-source {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 4px;
   font-size: 12px;
   color: var(--beone-text-secondary);
+  min-width: 0;
+  line-height: 1.45;
 }
+.lineage-source .el-icon { flex: 0 0 auto; margin-top: 2px; }
+.lineage-source a, .lineage-source span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.lineage-card.expanded .lineage-name,
+.lineage-card.expanded .lineage-value,
+.lineage-card.expanded .lineage-detail,
+.lineage-card.expanded .lineage-source a,
+.lineage-card.expanded .lineage-source span {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+}
+.lineage-card.expanded .lineage-markdown { max-height: none; }
 
 .empty-state {
   margin-top: 60px;

@@ -1,6 +1,6 @@
 """凭据模块（从 AIBI 移植并裁剪）。
 
-- credential（ABC）+ 子类（sql_credential / azure_openai_credential）
+- credential（ABC）+ 子类（SQL / Azure OpenAI / Web IQ / 本地文件）
 - credential_provider（ABC）+ azure_keyvault_credential_provider（Azure Key Vault 实现）
 
 设计：DB 表 `nexus.app_credential` 只存映射（credential_name -> credential_type + secret_name），
@@ -145,6 +145,25 @@ class azure_openai_credential(credential):
         return conf
 
 
+class web_iq_credential(credential):
+    """Microsoft Web IQ 凭据。API 端点是固定公共端点，凭据只保存 API Key。"""
+
+    display_name: str = "Microsoft Web IQ"
+    description: str = "Microsoft Web IQ Web Search / Browse API 凭据。"
+    schema: list[dict] = [
+        {"name": "api_key", "type": "password", "required": True, "sensitive": True,
+         "description": "Web IQ API Key（通过 x-apikey 请求头发送）"},
+    ]
+
+    def __init__(self, name: str, credential_type: str, data: dict):
+        super().__init__(name, credential_type, data)
+        if not self._data.get("api_key"):
+            raise ValueError(f"web_iq_credential {name!r} missing required field: api_key")
+
+    def to_config(self) -> dict:
+        return {"api_key": self._data["api_key"]}
+
+
 class local_file_credential(credential):
     """本地文件（夹）凭据。base_dir 必填；filename 可选。
 
@@ -176,6 +195,7 @@ class local_file_credential(credential):
 # 注册内置凭据类型
 credential.register_type("sql", sql_credential)
 credential.register_type("azure_openai", azure_openai_credential)
+credential.register_type("web_iq", web_iq_credential)
 credential.register_type("local_file", local_file_credential)
 
 

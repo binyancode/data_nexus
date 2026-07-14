@@ -1,6 +1,7 @@
 """优化器：逻辑 SQG → 物理执行计划（多节点 / 多算子）。
 
 - AGGREGATE：据指标 concept 的绑定拼下推 SQL（选中数据源）。
+- SEARCH / BROWSE：路由到 Web 搜索/网页读取能力源。
 - ASK：路由到 agent（LLM）resolver，call 带回填用的 prompt。
 - ACT：路由到 action resolver，call 带动作 + 描述。
 resolver 选择优先看 concept 绑定，缺失则按 registry 里的 resolver 类型兜底。
@@ -88,6 +89,10 @@ class Optimizer:
     def _plan_node(self, node, ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
         if node.operator == Operator.AGGREGATE:
             return self._plan_aggregate(node, ctx)
+        if node.operator == Operator.SEARCH:
+            return self._plan_search(node)
+        if node.operator == Operator.BROWSE:
+            return self._plan_browse(node)
         if node.operator == Operator.ASK:
             return self._plan_ask(node)
         if node.operator == Operator.ACT:
@@ -679,6 +684,42 @@ class Optimizer:
                 out.append(QueryFilter(col=col, op=op, value=value,
                                        value_format=f.get("value_format")))
         return out
+
+    # ── SEARCH / BROWSE → Web 能力源 ──
+    def _plan_search(self, node) -> PlanNode:
+        resolver = self._concept_resolver(node.concept)
+        if not self._allowed(resolver):
+            resolver = self._first_with_operator("SEARCH")
+        if not resolver:
+            return self._failed_capability(node, "没有可用的 Web 搜索能力源")
+        call = {"node_id": node.id, "mode": "search"}
+        for key in ("query", "max_results", "language", "region", "max_length",
+                    "content_format", "location", "include_adult"):
+            if key in node.params:
+                call[key] = node.params[key]
+        return PlanNode(id=node.id, operator=node.operator, name=node.name,
+                        resolver=resolver, call=call, depends_on=list(node.depends_on))
+
+    def _plan_browse(self, node) -> PlanNode:
+        resolver = self._concept_resolver(node.concept)
+        if not self._allowed(resolver):
+            resolver = self._first_with_operator("BROWSE")
+        if not resolver:
+            return self._failed_capability(node, "没有可用的网页浏览能力源")
+        call = {"node_id": node.id, "mode": "browse"}
+        for key in ("url", "max_length", "live_crawl", "render_dynamic_pages",
+                    "include_web_links", "include_image_links", "language", "region",
+                    "content_format"):
+            if key in node.params:
+                call[key] = node.params[key]
+        return PlanNode(id=node.id, operator=node.operator, name=node.name,
+                        resolver=resolver, call=call, depends_on=list(node.depends_on))
+
+    @staticmethod
+    def _failed_capability(node, reason: str) -> PlanNode:
+        return PlanNode(id=node.id, operator=node.operator, name=node.name, resolver="",
+                        call={"node_id": node.id, "error": reason},
+                        depends_on=list(node.depends_on))
 
     # ── ASK → agent(LLM) ──
     def _plan_ask(self, node) -> Optional[PlanNode]:

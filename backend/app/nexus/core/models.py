@@ -71,6 +71,8 @@ class Operator(str, Enum):
     FILTER = "FILTER"      # 过滤条件
     AGGREGATE = "AGGREGATE"  # 聚合指标
     JOIN = "JOIN"          # 关联
+    SEARCH = "SEARCH"      # 搜索公开信息源（如 Web IQ Web Search）
+    BROWSE = "BROWSE"      # 读取指定文档/URL（如 Web IQ Browse）
     ASK = "ASK"            # 问一个 Agent
     ACT = "ACT"            # 执行动作
     PROJECT = "PROJECT"    # 从合并节点结果里取一列（优化器融合后的拆分）
@@ -87,7 +89,11 @@ class SQGNode(BaseModel):
 
     def result_kind(self) -> str:
         """结果形态（据算子 + 参数判定，供优化器/生成器统一分派，避免按行结构猜）：
-        text(ASK) / action(ACT) / list(维度去重列举) / ranking(分组多行) / scalar(单值)。"""
+        search / document / text(ASK) / action(ACT) / list / ranking / scalar。"""
+        if self.operator == Operator.SEARCH:
+            return "search"
+        if self.operator == Operator.BROWSE:
+            return "document"
         if self.operator == Operator.ASK:
             return "text"
         if self.operator == Operator.ACT:

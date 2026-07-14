@@ -37,6 +37,7 @@ def _result_value(res: NodeResult):
 
 
 _MAX_BACKFILL_ROWS = 200
+_MAX_BACKFILL_CHARS = 100000
 
 
 def _cell(v) -> str:
@@ -68,6 +69,8 @@ def _render_result(res: NodeResult) -> str:
     body = "；".join(fmt_row(r) for r in shown)
     if len(rows) > len(shown):
         body += f"；…（共 {len(rows)} 行，仅列出前 {len(shown)} 行）"
+    if len(body) > _MAX_BACKFILL_CHARS:
+        body = body[:_MAX_BACKFILL_CHARS] + "…（内容过长，已截断）"
     return body
 
 

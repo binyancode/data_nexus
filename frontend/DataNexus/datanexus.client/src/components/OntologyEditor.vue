@@ -104,7 +104,7 @@
 
         <!-- 概念列表：指标 / 派生 / 动作 -->
         <template v-else>
-          <!-- 本体能力源（挂载的 resolver）：SQL 随实体自动，agent/action 手动 -->
+          <!-- 本体能力源（挂载的 resolver）：有概念源随实体自动，其余能力源手动 -->
           <div class="rsrc">
             <div class="rsrc-h">
               <span>能力源（{{ (graph.resolvers || []).length }}）</span>
@@ -116,7 +116,7 @@
                 <button v-if="meta?.canEdit && r.type !== 'sql'" class="rc-x" title="卸载" @click="detachResolver(r.name)">✕</button>
               </span>
             </div>
-            <div v-else class="rsrc-empty">未挂载任何源。导入实体会自动挂 SQL 源；agent/action 点「挂载」。</div>
+            <div v-else class="rsrc-empty">未挂载任何源。导入实体会自动挂数据源；Agent / Web IQ / Action 点「挂载」。</div>
           </div>
 
           <div class="seg3">
@@ -213,15 +213,15 @@
 
     <ImportWizard v-model="importOpen" @imported="onImported" />
 
-    <!-- 挂载能力源（无 concept 的 resolver：agent/action） -->
+    <!-- 挂载无 concept 的能力源（Agent / Web IQ / Action 等） -->
     <el-dialog v-model="attachOpen" title="挂载能力源" width="440px">
       <div class="fld">
-        <label>选择一个能力源（agent / action）</label>
+        <label>选择一个能力源（Agent / Web IQ / Action）</label>
         <el-select v-model="attachPick" style="width:100%" placeholder="选择 resolver" filterable>
           <el-option v-for="r in attachable" :key="r.name" :value="r.name"
                      :label="`${r.name}（${r.type}）`" />
         </el-select>
-        <div v-if="!attachable.length" class="hint">没有可挂载的能力源。请先到「源管理」新增 agent / action 源。</div>
+        <div v-if="!attachable.length" class="hint">没有可挂载的能力源。请先到「源管理」新增 Agent / Web IQ / Action 源。</div>
       </div>
       <template #footer>
         <el-button @click="attachOpen = false">取消</el-button>
@@ -658,6 +658,7 @@ function slug(s: string) {
 }
 .rsrc-chip .rc-dot { width: 7px; height: 7px; border-radius: 50%; background: #5b7fa6; }
 .rsrc-chip.agent .rc-dot { background: #7a5cd0; }
+.rsrc-chip.web_iq .rc-dot { background: #168aad; }
 .rsrc-chip.action .rc-dot { background: #d0782f; }
 .rc-type { font-size: 10px; color: #93a2b4; }
 .rc-x { border: 0; background: none; cursor: pointer; color: #b0bccb; font-size: 11px; padding: 0; }

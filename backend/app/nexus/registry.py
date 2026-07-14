@@ -15,6 +15,7 @@ from nexus.resolvers.sql import SqlResolver
 from nexus.resolvers.csv import CsvResolver
 from nexus.resolvers.agent import AgentResolver
 from nexus.resolvers.action import ActionResolver
+from nexus.resolvers.web_iq import WebIqResolver
 from nexus.llm.base import LLMProvider
 from nexus.llm.azure_openai import AzureOpenAIProvider
 
@@ -26,6 +27,7 @@ _RESOLVER_TYPES: dict[str, type] = {
     "csv": CsvResolver,
     "agent": AgentResolver,
     "action": ActionResolver,
+    "web_iq": WebIqResolver,
 }
 _LLM_PROVIDERS: dict[str, type] = {
     "azure_openai": AzureOpenAIProvider,
@@ -97,6 +99,11 @@ class ResolverRegistry:
 
     def reload(self) -> "ResolverRegistry":
         """清空并从 DB 重新装配（供源/凭据/LLM 管理保存后即时生效，免重启）。"""
+        for resolver in self._resolvers.values():
+            try:
+                resolver.close()
+            except Exception as exc:
+                _logger.warning(f"resolver close failed: {resolver.name}: {exc}")
         self._resolvers = {}
         self._llms = {}
         self._default_llm = None

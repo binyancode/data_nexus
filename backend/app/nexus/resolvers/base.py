@@ -48,6 +48,10 @@ class Resolver(ABC):
         """取样例数据（默认不支持）。"""
         return []
 
+    def close(self) -> None:
+        """释放连接池/HTTP Client 等资源（默认无需处理）。"""
+        return None
+
     def capabilities(self) -> dict:
         return {"name": self.name, "type": self.resolver_type,
                 "provides_concepts": self.provides_concepts,

@@ -14,6 +14,10 @@ _DEFAULT_SYSTEM = (
     "你是资深业务分析师。基于用户给出的具体数值，用中文做简明的对比与归因分析，"
     "指出关键差异、给出最可能的原因和一句结论。控制在 3-4 句以内，不要罗列无关内容。"
 )
+_MARKDOWN_OUTPUT = (
+    "输出必须使用有效的 GitHub Flavored Markdown：用标题、段落、列表组织内容；"
+    "遇到二维或多行数据优先使用 Markdown 表格。不要用 HTML，不要把整份回答包在代码块中。"
+)
 
 
 class AgentResolver(Resolver):
@@ -29,7 +33,7 @@ class AgentResolver(Resolver):
     def fetch(self, call: dict, ctx: Optional[ExecContext] = None) -> NodeResult:
         node_id = call.get("node_id", "")
         prompt = call.get("prompt") or call.get("ask") or ""
-        system = call.get("system") or _DEFAULT_SYSTEM
+        system = f"{(call.get('system') or _DEFAULT_SYSTEM).rstrip()}\n\n{_MARKDOWN_OUTPUT}"
         try:
             text = self._llm.complete(
                 [{"role": "system", "content": system}, {"role": "user", "content": prompt}]

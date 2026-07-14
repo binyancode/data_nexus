@@ -40,5 +40,6 @@ export const RESOLVER_CRED_TYPE: Record<string, string[]> = {
   sql: ['sql'],
   csv: ['local_file'],
   agent: ['azure_openai'],
+  web_iq: ['web_iq'],
   action: [],
 }
