@@ -6,10 +6,10 @@ REM 2. Pip image (Python dependencies)
 REM docker build -f docker/Dockerfile-backend.pip  -t datanexus-python-pip:3.11 backend
 REM 3. App image (application code)
 docker build -f docker/Dockerfile-backend      -t datanexus-api backend
-docker tag datanexus-api bycontainer.azurecr.io/datanexus-api
-docker push bycontainer.azurecr.io/datanexus-api
+docker tag datanexus-api binyancontainerea.azurecr.io/datanexus-api
+docker push binyancontainerea.azurecr.io/datanexus-api
 
 REM ─── Frontend (ASP.NET + Vue) ───
 docker build -t datanexus-server -f docker/Dockerfile-frontend frontend/DataNexus
-docker tag datanexus-server bycontainer.azurecr.io/datanexus-server
-docker push bycontainer.azurecr.io/datanexus-server
+docker tag datanexus-server binyancontainerea.azurecr.io/datanexus-server
+docker push binyancontainerea.azurecr.io/datanexus-server

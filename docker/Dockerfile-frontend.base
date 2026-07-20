@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1
+# Frontend build base: .NET 10 SDK + Node.js 22.
+# Build only when the .NET SDK or Node major version changes:
+# docker build -f docker/Dockerfile-frontend.base -t datanexus-frontend-base:10.0-node22 .
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0
+
+RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources && \
+    apt-get -o Acquire::Retries=5 update && \
+    apt-get -o Acquire::Retries=5 install -y curl && \
+    curl -fsSL --retry 5 --retry-all-errors https://deb.nodesource.com/setup_22.x | bash && \
+    apt-get -o Acquire::Retries=5 install -y nodejs && \
+    node --version && npm --version && \
+    rm -rf /var/lib/apt/lists/*
