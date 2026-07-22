@@ -13,7 +13,15 @@ namespace DataNexus.Server
         public static void Main(string[] args)
         {
             var builder = WebApplication.CreateBuilder(args);
-
+            var appEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+            if (!string.IsNullOrWhiteSpace(appEnv))
+            {
+                builder.Configuration.AddJsonFile($"appsettings.{appEnv}.json", optional: true, reloadOnChange: true);
+            }
+            else
+            {
+                builder.Configuration.AddJsonFile($"appsettings.json", optional: true, reloadOnChange: true);
+            }
             builder.Services.AddMemoryCache();
             builder.Services.AddHttpContextAccessor();
 

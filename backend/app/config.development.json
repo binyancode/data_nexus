@@ -12,7 +12,7 @@
     "sql_db": {
         "auth_method": "password",
         "server": "binyansql-ea-01.database.windows.net",
-        "database": "binyandb-data-nexus",
+        "database": "binyandb-data-nexus_dev",
         "username": "binyan",
         "password": "AzureGlobal123!@#",
         "driver": "{ODBC Driver 18 for SQL Server}",
@@ -26,7 +26,7 @@
         }
     },
     "credential_provider": {
-        "vault_url": "https://binyankv-data-nexus.vault.azure.net/",
+        "vault_url": "https://binyankv-data-nexus-dev.vault.azure.net/",
         "auth_method": "default",
         "tenant_id": "03d87c9e-bf69-4287-adc9-db61022cf75b"
     },

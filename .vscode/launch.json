@@ -19,7 +19,8 @@
       "cwd": "${workspaceFolder}/backend",
       "envFile": "${workspaceFolder}/backend/.env",
       "env": {
-        "PYTHONPATH": "${workspaceFolder};${workspaceFolder}/backend;${workspaceFolder}/backend/app"
+        "PYTHONPATH": "${workspaceFolder};${workspaceFolder}/backend;${workspaceFolder}/backend/app",
+        "APP_ENVIRONMENT": "development"
       },
       "jinja": true
     }
