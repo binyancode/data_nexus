@@ -97,7 +97,7 @@ namespace DataNexus.Server.Controllers
                 return new APIResponseModel { State = "error", Message = "名称不能为空" };
 
             var id = "onto_" + Guid.NewGuid().ToString("N").Substring(0, 12);
-            var emptyGraph = "{\"entities\":[],\"relations\":[],\"metrics\":[],\"derivations\":[],\"actions\":[]}";
+            var emptyGraph = "{\"version\":3,\"entities\":[],\"relations\":[],\"metrics\":[],\"derivations\":[],\"actions\":[],\"resolvers\":[]}";
             await _sql.ExecuteNonQueryAsync(
                 @"INSERT INTO nexus.ontology (ontology_id, name, description, owner, visibility, state, graph)
                   VALUES (@id, @name, @desc, @me, 'private', 'draft', @graph);",
@@ -124,6 +124,26 @@ namespace DataNexus.Server.Controllers
         public async Task<APIResponseModel> Save(string id, [FromBody] SaveDto dto)
         {
             if (!await IsOwnerAsync(id)) return new APIResponseModel { State = "error", Message = "只有创建者可编辑" };
+            if (dto.Graph.ValueKind != JsonValueKind.Object
+                || !dto.Graph.TryGetProperty("version", out var version)
+                || version.GetInt32() != 3)
+                return new APIResponseModel { State = "error", Message = "本体 graph.version 必须为 3" };
+            if (dto.Graph.TryGetProperty("relations", out var relations) && relations.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var relation in relations.EnumerateArray())
+                {
+                    if (!relation.TryGetProperty("from", out _)
+                        || !relation.TryGetProperty("to", out _)
+                        || !relation.TryGetProperty("multiplicity", out _)
+                        || !relation.TryGetProperty("integrity", out _))
+                        return new APIResponseModel { State = "error", Message = "关系必须设置端点、双向基数、可选性和完整性来源" };
+                    if (relation.TryGetProperty("confirmation", out var confirmation)
+                        && confirmation.TryGetProperty("required", out var required)
+                        && required.GetBoolean()
+                        && (!confirmation.TryGetProperty("confirmed", out var confirmed) || !confirmed.GetBoolean()))
+                        return new APIResponseModel { State = "error", Message = "存在尚未确认语义的导入关系" };
+                }
+            }
             var graphStr = dto.Graph.ValueKind == JsonValueKind.Undefined ? "{}" : dto.Graph.GetRawText();
             await _sql.ExecuteNonQueryAsync(
                 @"UPDATE nexus.ontology
@@ -146,6 +166,20 @@ namespace DataNexus.Server.Controllers
         public async Task<APIResponseModel> Publish(string id, [FromBody] PublishDto dto)
         {
             if (!await IsOwnerAsync(id)) return new APIResponseModel { State = "error", Message = "只有创建者可发布" };
+            var current = await FetchAsync(id);
+            if (current == null) return new APIResponseModel { State = "error", Message = "本体不存在" };
+            using (var graphDoc = JsonDocument.Parse(current.Field<string?>("graph") ?? "{}"))
+            {
+                var graph = graphDoc.RootElement;
+                if (!graph.TryGetProperty("version", out var version) || version.GetInt32() != 3)
+                    return new APIResponseModel { State = "error", Message = "只能发布 graph v3 本体" };
+                if (graph.TryGetProperty("relations", out var relations) && relations.ValueKind == JsonValueKind.Array)
+                    foreach (var relation in relations.EnumerateArray())
+                        if (relation.TryGetProperty("confirmation", out var confirmation)
+                            && confirmation.TryGetProperty("required", out var required) && required.GetBoolean()
+                            && (!confirmation.TryGetProperty("confirmed", out var confirmed) || !confirmed.GetBoolean()))
+                            return new APIResponseModel { State = "error", Message = "存在尚未确认语义的导入关系" };
+            }
             var vis = dto.Visibility is "public" or "shared" or "private" ? dto.Visibility : "private";
 
             await _sql.ExecuteNonQueryAsync(

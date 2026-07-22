@@ -1,146 +1,127 @@
 <template>
-  <div class="ked">
-    <div class="note">
-      <el-icon><InfoFilled /></el-icon>
-      指标用<b>属性</b>来表达，例如 <code>SUM(销售·金额 − 销售·成本)</code>。属性自带所属实体，引擎据此<b>自动推导表与 JOIN</b>，无需选单一实体。
+  <div class="metric-editor">
+    <div class="note">指标保存为强类型表达式，不保存或解析 SQL 字符串。物理列和 JOIN 由本体绑定与关系自动解析。</div>
+    <div class="grid">
+      <label>统计函数
+        <el-select v-model="fn">
+          <el-option v-for="value in functions" :key="value" :value="value" :label="value" />
+        </el-select>
+      </label>
+      <label>结果类型
+        <el-select v-model="resultType"><el-option value="decimal" label="decimal" /><el-option value="integer" label="integer" /></el-select>
+      </label>
+      <label>单位<el-input v-model="unit" placeholder="CNY / % / 件" /></label>
     </div>
 
-    <div class="ef">
-      <label>聚合表达式</label>
-      <el-input ref="exprRef" v-model="expr" type="textarea" :rows="2" class="mono"
-                placeholder="点下方按钮/属性插入，如 SUM(attribute.sales.amount - attribute.sales.cost)" />
-      <div class="tools">
-        <button v-for="fn in fns" :key="fn" class="chip fn" @mousedown.prevent="insert(fn + '(')">{{ fn }}()</button>
-        <span class="sep"></span>
-        <button v-for="op in ops" :key="op" class="chip op" @mousedown.prevent="insert(' ' + op + ' ')">{{ op }}</button>
-        <button class="chip op" @mousedown.prevent="insert(')')">)</button>
-      </div>
+    <div v-if="fn === 'PERCENTILE'" class="grid">
+      <label>百分位<el-input-number v-model="percentile" :min="0" :max="1" :step="0.05" /></label>
+      <label>方法<el-select v-model="method"><el-option value="CONTINUOUS" label="连续" /><el-option value="DISCRETE" label="离散" /></el-select></label>
+      <label>精度<el-select v-model="accuracy"><el-option value="EXACT" label="精确" /><el-option value="APPROXIMATE" label="近似" /></el-select></label>
     </div>
 
-    <div class="ef">
-      <label>可用属性（点击插入）</label>
-      <div v-if="!attrGroups.length" class="attr-empty">还没有属性概念。先建 attribute 类别的概念（列在实体上）。</div>
-      <div v-for="g in attrGroups" :key="g.key" class="ag">
-        <div class="ag-h"><span class="ag-dot"></span>{{ g.entityName }}</div>
-        <div class="ag-body">
-          <button v-for="a in g.items" :key="a.id" class="chip attr" @mousedown.prevent="insert(a.id)" :title="a.id">
-            {{ a.name }}
-          </button>
+    <div class="expression">
+      <div class="expr-head"><b>被统计表达式</b><el-button size="small" @click="addTerm">＋ 添加项</el-button></div>
+      <div v-if="terms.length" class="terms">
+        <div v-for="(term, index) in terms" :key="index" class="term">
+          <el-select v-if="index > 0" v-model="term.operator" class="operator">
+            <el-option value="ADD" label="＋" /><el-option value="SUBTRACT" label="－" />
+            <el-option value="MULTIPLY" label="×" /><el-option value="DIVIDE" label="÷" />
+          </el-select>
+          <span v-else class="first">起始</span>
+          <el-select v-model="term.attribute" filterable class="attribute" placeholder="选择属性">
+            <el-option-group v-for="group in attrGroups" :key="group.entity" :label="group.name">
+              <el-option v-for="attribute in group.attributes" :key="attribute.id" :value="attribute.id" :label="attribute.name" />
+            </el-option-group>
+          </el-select>
+          <el-button text type="danger" @click="terms.splice(index, 1)">删除</el-button>
         </div>
       </div>
+      <div v-else class="empty">COUNT(*) 可以留空；其它统计函数请选择至少一个属性。</div>
     </div>
 
-    <div class="preview" v-if="expr">
-      <div class="pv-row"><span class="pv-k">预览</span><code>{{ prettyExpr }}</code></div>
-      <div class="pv-row"><span class="pv-k">涉及实体</span>
-        <span v-if="involvedEntities.length" class="ents">
-          <span v-for="e in involvedEntities" :key="e" class="ent-tag">{{ entityName(e) }}</span>
-        </span>
-        <span v-else class="pv-warn">未识别到属性引用</span>
-      </div>
+    <div class="preview">
+      <span>Typed Expression</span>
+      <pre>{{ JSON.stringify(expression, null, 2) }}</pre>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { attrField } from './attrs'
+import { computed, ref, watch } from 'vue'
 import type { Concept } from '../../bff/Ontology'
 
 const attrs = defineModel<Record<string, any>>('attrs', { default: () => ({}) })
 const props = defineProps<{ concepts: Concept[] }>()
+type Term = { operator: 'ADD' | 'SUBTRACT' | 'MULTIPLY' | 'DIVIDE'; attribute: string }
 
-const expr = attrField<string>(attrs, 'expr')
-const exprRef = ref<any>(null)
-const fns = ['SUM', 'AVG', 'COUNT', 'MIN', 'MAX']
-const ops = ['+', '-', '*', '/']
+const functions = ['SUM', 'COUNT', 'COUNT_DISTINCT', 'AVG', 'MIN', 'MAX', 'MEDIAN', 'PERCENTILE', 'VARIANCE', 'STDDEV']
+const fn = ref('SUM'), resultType = ref('decimal'), unit = ref(''), percentile = ref(0.5)
+const method = ref<'CONTINUOUS' | 'DISCRETE'>('CONTINUOUS')
+const accuracy = ref<'EXACT' | 'APPROXIMATE'>('EXACT')
+const terms = ref<Term[]>([])
+let loading = false
 
-const attributes = computed(() => props.concepts.filter((c) => c.kind === 'attribute'))
-function attrEntity(c: Concept): string {
-  try { return (JSON.parse(c.attrs || '{}') || {}).entity || '' } catch { return '' }
-}
-function entityName(id: string): string {
-  return props.concepts.find((c) => c.id === id)?.name || id
-}
+const attributes = computed(() => props.concepts.filter((concept) => concept.kind === 'attribute'))
+function entityOf(concept: Concept) { try { return JSON.parse(concept.attrs || '{}').entity || '' } catch { return '' } }
 const attrGroups = computed(() => {
-  const map = new Map<string, { key: string; entityName: string; items: Concept[] }>()
-  for (const a of attributes.value) {
-    const ent = attrEntity(a)
-    const key = ent || '__none__'
-    if (!map.has(key)) map.set(key, { key, entityName: ent ? entityName(ent) : '（未指定实体）', items: [] })
-    map.get(key)!.items.push(a)
+  const groups = new Map<string, { entity: string; name: string; attributes: Concept[] }>()
+  for (const attribute of attributes.value) {
+    const entity = entityOf(attribute)
+    if (!groups.has(entity)) groups.set(entity, { entity, name: props.concepts.find((c) => c.id === entity)?.name || entity, attributes: [] })
+    groups.get(entity)!.attributes.push(attribute)
   }
-  return [...map.values()]
+  return [...groups.values()]
 })
 
-function insert(token: string) {
-  const ta = exprRef.value?.textarea as HTMLTextAreaElement | undefined
-  const cur = expr.value || ''
-  if (!ta) { expr.value = cur + token; return }
-  const s = ta.selectionStart ?? cur.length
-  const e = ta.selectionEnd ?? cur.length
-  expr.value = cur.slice(0, s) + token + cur.slice(e)
-  const pos = s + token.length
-  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(pos, pos) })
+function valueExpression() {
+  if (!terms.value.length) return null
+  let value: any = { kind: 'attribute', concept: terms.value[0]!.attribute }
+  for (const term of terms.value.slice(1)) {
+    value = { kind: 'binary', operator: term.operator, left: value, right: { kind: 'attribute', concept: term.attribute }, zero_division: 'NULL' }
+  }
+  return value
 }
+const expression = computed(() => ({
+  kind: 'aggregate', function: fn.value, value: valueExpression(), distinct: false,
+  ...(fn.value === 'PERCENTILE' ? { percentile: percentile.value, method: method.value, accuracy: accuracy.value } : {}),
+  nulls: 'IGNORE',
+}))
 
-const attrToken = /attribute(?:\.[A-Za-z0-9_]+)+/g
-const prettyExpr = computed(() =>
-  (expr.value || '').replace(attrToken, (id) => {
-    const c = props.concepts.find((x) => x.id === id)
-    if (!c) return id
-    const ent = attrEntity(c)
-    return ent ? `${entityName(ent)}·${c.name}` : c.name
-  }),
-)
-const involvedEntities = computed(() => {
-  const ids = (expr.value || '').match(attrToken) || []
-  const ents: string[] = []
-  for (const id of ids) {
-    const c = props.concepts.find((x) => x.id === id)
-    const ent = c ? attrEntity(c) : ''
-    if (ent && !ents.includes(ent)) ents.push(ent)
+function flatten(value: any): Term[] {
+  if (!value) return []
+  if (value.kind === 'attribute') return [{ operator: 'ADD', attribute: value.concept }]
+  if (value.kind === 'binary') {
+    const left = flatten(value.left), right = flatten(value.right)
+    if (right.length) right[0]!.operator = value.operator
+    return [...left, ...right]
   }
-  return ents
-})
+  return []
+}
+function load() {
+  loading = true
+  const expressionValue = attrs.value.expression || {}
+  fn.value = expressionValue.function || 'SUM'
+  percentile.value = expressionValue.percentile ?? 0.5
+  method.value = expressionValue.method || 'CONTINUOUS'
+  accuracy.value = expressionValue.accuracy || 'EXACT'
+  terms.value = flatten(expressionValue.value)
+  resultType.value = attrs.value.result_type || 'decimal'
+  unit.value = attrs.value.unit || ''
+  loading = false
+}
+watch(() => attrs.value, load, { immediate: true })
+watch([fn, resultType, unit, percentile, method, accuracy, terms], () => {
+  if (loading) return
+  const next = { ...attrs.value, expression: expression.value, result_type: resultType.value, unit: unit.value || null }
+  if (JSON.stringify(next) !== JSON.stringify(attrs.value)) attrs.value = next
+}, { deep: true })
+function addTerm() { terms.value.push({ operator: terms.value.length ? 'ADD' : 'ADD', attribute: '' }) }
 </script>
 
 <style scoped>
-.ked { display: flex; flex-direction: column; gap: 14px; }
-.ef label { display: block; font-size: 12px; color: var(--beone-text-secondary); margin-bottom: 4px; }
-.mono :deep(.el-textarea__inner) { font-family: 'Cascadia Code', Consolas, monospace; }
-.note {
-  display: block; font-size: 12px;
-  color: var(--beone-text-regular); background: var(--beone-bg-midnight-soft);
-  border-radius: 8px; padding: 10px 12px; line-height: 1.6;
-}
-.note :deep(.el-icon) { margin-right: 6px; vertical-align: -0.15em; color: var(--beone-cerulean-blue); }
-.note b { color: var(--beone-text-primary); }
-.note code { color: var(--beone-cerulean-blue); font-family: 'Cascadia Code', Consolas, monospace; }
-
-.tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
-.sep { width: 1px; height: 18px; background: var(--beone-border); margin: 0 4px; }
-.chip {
-  border: 1px solid var(--beone-border); background: var(--beone-bg-panel); cursor: pointer;
-  border-radius: 6px; font-size: 12px; padding: 3px 9px; color: var(--beone-text-regular);
-  font-family: 'Cascadia Code', Consolas, monospace;
-}
-.chip:hover { border-color: var(--beone-cerulean-blue); color: var(--beone-cerulean-blue); }
-.chip.fn { color: var(--beone-cerulean-blue); }
-.chip.op { min-width: 26px; text-align: center; }
-.chip.attr { font-family: inherit; }
-
-.attr-empty { font-size: 12px; color: var(--beone-text-secondary); }
-.ag { margin-bottom: 8px; }
-.ag-h { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--beone-text-secondary); margin-bottom: 5px; }
-.ag-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--beone-cerulean-blue); }
-.ag-body { display: flex; flex-wrap: wrap; gap: 6px; }
-
-.preview { font-size: 12px; background: var(--beone-bg-panel-muted); border: 1px solid var(--beone-border); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
-.pv-row { display: flex; align-items: center; gap: 8px; }
-.pv-k { color: var(--beone-text-secondary); flex: 0 0 auto; width: 56px; }
-.preview code { color: var(--beone-cerulean-blue); font-family: 'Cascadia Code', Consolas, monospace; }
-.ents { display: flex; flex-wrap: wrap; gap: 6px; }
-.ent-tag { background: var(--beone-bg-midnight-soft); color: var(--beone-text-primary); border-radius: 9px; padding: 1px 9px; }
-.pv-warn { color: var(--beone-autumn-leaf); font-family: 'Cascadia Code', Consolas, monospace; }
+.metric-editor { display:flex; flex-direction:column; gap:12px; }.note { font-size:12px; line-height:1.55; background:#eef7fa; border-left:3px solid #27a8b1; padding:9px 11px; border-radius:7px; color:#3a5268; }
+.grid { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; }.grid label { font-size:11px; color:#6c8298; display:flex; flex-direction:column; gap:4px; }
+.expression,.preview { border:1px solid #dbe5f2; background:#f8fbff; border-radius:9px; padding:10px; }.expr-head { display:flex; justify-content:space-between; align-items:center; color:#29475f; font-size:12px; }
+.terms { display:flex; flex-direction:column; gap:7px; margin-top:8px; }.term { display:flex; align-items:center; gap:7px; }.operator { width:70px; }.attribute { flex:1; }.first { width:70px; color:#8497aa; font-size:11px; text-align:center; }.empty { color:#8497aa; font-size:11px; padding-top:8px; }
+.preview span { color:#6c8298; font-size:11px; }.preview pre { max-height:180px; overflow:auto; font:10px/1.45 'Cascadia Code',Consolas,monospace; color:#35516c; white-space:pre-wrap; }
 </style>

@@ -11,7 +11,9 @@
       <div v-for="(li, i) in lineage" :key="i" class="li">
         <div class="li-top">
           <span class="li-name">{{ li.label }}</span>
-          <span v-if="!sameLineageUrl(li)" class="li-val">{{ li.value }}</span>
+          <MarkdownContent v-if="!sameLineageUrl(li) && hasMarkdown(li.valueText)"
+                           class="li-val li-markdown" :content="li.valueText" compact />
+          <span v-else-if="!sameLineageUrl(li)" class="li-val">{{ li.valueText }}</span>
         </div>
         <div class="li-src">
           <span>⛁</span>
@@ -30,6 +32,7 @@ import { computed } from 'vue'
 import StageShell from './StageShell.vue'
 import MarkdownContent from '../common/MarkdownContent.vue'
 import { safeParse } from './dag'
+import { formatLineageValue, hasMarkdown, isUrlValue } from './lineageFormat'
 import type { RunStage } from '../../bff/Runs'
 
 interface Answer {
@@ -40,8 +43,11 @@ const props = defineProps<{ stage: RunStage | null }>()
 
 const answer = computed(() => safeParse<Answer>(props.stage?.output))
 const answerText = computed(() => answer.value?.text ?? '')
-const lineage = computed(() => answer.value?.lineage ?? [])
-function isUrl(value: unknown): boolean { return /^https?:\/\//i.test(String(value ?? '')) }
+const lineage = computed(() => (answer.value?.lineage ?? []).map((item) => ({
+  ...item,
+  valueText: formatLineageValue(item.value),
+})))
+function isUrl(value: unknown): boolean { return isUrlValue(value) }
 function sameLineageUrl(li: { value: unknown; source: string }): boolean {
   return isUrl(li.value) && String(li.value) === li.source
 }
@@ -57,6 +63,7 @@ function sameLineageUrl(li: { value: unknown; source: string }): boolean {
 .li-top { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .li-name { font-size: 12px; color: var(--tech-dim); overflow-wrap: anywhere; }
 .li-val { min-width: 0; font-size: 15px; font-weight: 700; color: var(--tech-text); overflow-wrap: anywhere; word-break: break-word; }
+.li-markdown { flex:1; min-width:0; font-size:12px; font-weight:400; }
 .li-src { display: flex; align-items: flex-start; gap: 4px; min-width: 0; font-size: 11px; color: var(--tech-cyan); margin-top: 2px; }
 .li-src a, .li-src span:last-child { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .li-src a { color: inherit; text-decoration: none; }

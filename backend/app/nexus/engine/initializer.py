@@ -97,7 +97,8 @@ class Initializer:
         visible = self.repo.list_for_user(ctx.as_user)   # 没选 → LLM 路由（一组）
         cand_ids = [o.ontology_id for o in visible]
         multi = len(cand_ids) > 1                         # 仅多候选的真正路由才缓存/复用
-        key = (ctx.question.strip(), tuple(sorted(cand_ids)))
+        normalized_question = " ".join((ctx.question or "").strip().casefold().split())
+        key = (normalized_question, tuple(sorted(cand_ids)))
         hit = self._route_cache_get(key) if multi else None
         reused_age = None
         if hit is not None:                               # 候选相同、1 小时内 → 复用路由结果，跳过 LLM

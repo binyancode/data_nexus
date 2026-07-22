@@ -33,8 +33,8 @@ class Resolver(ABC):
         """执行一次调用。call 的结构由各类型自定义（如 SQL: {node_id, sql, params}）。"""
         ...
 
-    def compile(self, spec) -> dict:
-        """把方言中立的 QuerySpec 编译成 fetch 用的 call（默认不支持）。
+    def compile(self, query) -> dict:
+        """把方言中立的 QueryIR 编译成 fetch 用的 call（默认不支持）。
 
         取数型 resolver（sql/csv…）重写本方法，产出各自语法的 call。
         """
@@ -55,4 +55,4 @@ class Resolver(ABC):
     def capabilities(self) -> dict:
         return {"name": self.name, "type": self.resolver_type,
                 "provides_concepts": self.provides_concepts,
-                "operators": sorted(self.operators)}
+                "operators": sorted(self.operators), "relational": {}}

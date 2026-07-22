@@ -43,7 +43,7 @@ namespace DataNexus.Server.Controllers
             return new APIResponseModel { Data = items };
         }
 
-        // 单次运行详情：run + 四段 stage + 各 node（前端轮询此接口刷新执行进度）
+        // 单次运行详情：run + 五段 stage + 各 PEP node（前端轮询此接口刷新执行进度）
         [HttpGet("{runId}")]
         public async Task<APIResponseModel> GetRun(string runId)
         {
@@ -70,7 +70,7 @@ namespace DataNexus.Server.Controllers
             };
 
             var stageT = await _sql.QueryAsync(
-                @"SELECT stage, seq, [state], [input], [output], error, cost_ms, started_at, ended_at
+                @"SELECT stage, seq, [state], [input], [output], logs, error, cost_ms, started_at, ended_at
                   FROM nexus.run_stage WHERE run_id = @id ORDER BY seq",
                 new[] { new SqlParameter("@id", runId) });
             var stages = stageT.AsEnumerable().Select(r => new
@@ -80,6 +80,7 @@ namespace DataNexus.Server.Controllers
                 state = r.Field<string?>("state"),
                 input = r.Field<string?>("input"),
                 output = r.Field<string?>("output"),
+                logs = r.Field<string?>("logs"),
                 error = r.Field<string?>("error"),
                 cost_ms = r.IsNull("cost_ms") ? (int?)null : r.Field<int>("cost_ms"),
                 started_at = r.Field<DateTime?>("started_at"),
@@ -87,7 +88,7 @@ namespace DataNexus.Server.Controllers
             }).ToList();
 
             var nodeT = await _sql.QueryAsync(
-                @"SELECT node_id, [state], resolver, [call], [output], [value], [source], trust, error, cost_ms, started_at, ended_at
+                @"SELECT node_id, [state], resolver, [call], [output], [value], [source], trust, logs, error, cost_ms, started_at, ended_at
                   FROM nexus.run_node WHERE run_id = @id",
                 new[] { new SqlParameter("@id", runId) });
             var nodes = nodeT.AsEnumerable().Select(r => new
@@ -100,6 +101,7 @@ namespace DataNexus.Server.Controllers
                 value = r.Field<string?>("value"),
                 source = r.Field<string?>("source"),
                 trust = r.IsNull("trust") ? (double?)null : r.Field<double>("trust"),
+                logs = r.Field<string?>("logs"),
                 error = r.Field<string?>("error"),
                 cost_ms = r.IsNull("cost_ms") ? (int?)null : r.Field<int>("cost_ms"),
                 started_at = r.Field<DateTime?>("started_at"),

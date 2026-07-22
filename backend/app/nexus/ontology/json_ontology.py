@@ -5,8 +5,8 @@ graph 结构（见前端画板）：
 {
   "entities":[{id,name,semantics,synonyms,resolver,table,key,
                attributes:[{id,name,column,role,synonyms,semantics}], layout:{x,y}}],
-  "relations":[{id,name,semantics,synonyms,from_entity,from_key,to_entity,to_key}],
-  "metrics":[{id,name,semantics,synonyms,expr}],
+    "relations":[{id,name,from,to,multiplicity,integrity,temporal}],
+    "metrics":[{id,name,semantics,synonyms,expression,result_type,unit}],
   "derivations":[{id,name,semantics,synonyms,prompt,inputs,resolver}],
   "actions":[{id,name,semantics,synonyms,action,desc,resolver,endpoint}]
 }
@@ -15,6 +15,7 @@ graph 结构（见前端画板）：
 from __future__ import annotations
 
 import re
+import copy
 from typing import Optional
 
 from nexus.core.models import Concept, Binding, ConceptKind
@@ -22,8 +23,6 @@ from nexus.ontology.store import OntologyStore
 
 # 多本体命名空间：概念 id 前缀 `本体id::`，让 id 全局唯一、本体信息随 id 流动。
 NS_SEP = "::"
-# 表达式里引用属性概念的裸记号（用于给 metric.expr 内嵌 token 加本体前缀）。
-_EXPR_ATTR = re.compile(r"attribute(?:\.[A-Za-z0-9_]+)+")
 
 
 def _syn(x) -> list:
@@ -45,11 +44,27 @@ class JsonOntology(OntologyStore):
             return cid
         return f"{self._ns}{NS_SEP}{cid}"
 
-    # 给表达式里内嵌的 attribute token 加本体前缀（metric.expr 等）。
-    def _pexpr(self, expr: Optional[str]) -> Optional[str]:
-        if not expr or not self._ns:
-            return expr
-        return _EXPR_ATTR.sub(lambda m: f"{self._ns}{NS_SEP}{m.group(0)}", expr)
+    def _namespace_value(self, value):
+        """Deep-prefix concept references while leaving physical names untouched."""
+        if not self._ns:
+            return copy.deepcopy(value)
+        if isinstance(value, list):
+            return [self._namespace_value(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        out = {}
+        for key, item in value.items():
+            if key in {"concept", "entity", "attribute", "metric", "fact_time", "valid_from", "valid_to"}:
+                if isinstance(item, list):
+                    out[key] = [self._p(v) for v in item]
+                else:
+                    out[key] = self._p(item)
+            elif key in {"from", "to", "expression", "value", "left", "right", "operand", "arguments",
+                         "branches", "otherwise", "when", "then", "filter", "temporal"}:
+                out[key] = self._namespace_value(item)
+            else:
+                out[key] = self._namespace_value(item)
+        return out
 
     # ── 摊平 graph → Concept/Binding ──
     def _build(self) -> None:
@@ -61,10 +76,13 @@ class JsonOntology(OntologyStore):
                 continue
             eid = self._p(eid)
             resolver = e.get("resolver") or ""
+            entity_attrs = {"key": e.get("key")} if e.get("key") else {}
+            if e.get("constraints"):
+                entity_attrs["constraints"] = copy.deepcopy(e["constraints"])
             self._add(Concept(
                 id=eid, kind=ConceptKind.entity, name=e.get("name") or eid,
                 semantics=e.get("semantics"), synonyms=_syn(e.get("synonyms")),
-                attrs={"key": e.get("key")} if e.get("key") else {},
+                attrs=entity_attrs,
             ))
             if e.get("table"):
                 self._bind(Binding(id=f"b.{eid}.table", concept_id=eid, resolver=resolver,
@@ -81,6 +99,8 @@ class JsonOntology(OntologyStore):
                     attrs["dtype"] = a["dtype"]
                 if a.get("additivity"):
                     attrs["additivity"] = a["additivity"]
+                if a.get("constraints"):
+                    attrs["constraints"] = copy.deepcopy(a["constraints"])
                 self._add(Concept(
                     id=aid, kind=ConceptKind.attribute, name=a.get("name") or aid,
                     semantics=a.get("semantics"), synonyms=_syn(a.get("synonyms")), attrs=attrs,
@@ -93,23 +113,30 @@ class JsonOntology(OntologyStore):
             rid = r.get("id")
             if not rid:
                 continue
-            # 前缀：relation id + from/to 实体 id；不前缀 from_key/to_key（物理列）。
+            frm = r.get("from") or {}
+            to = r.get("to") or {}
+            attrs = {
+                "from": self._namespace_value(frm),
+                "to": self._namespace_value(to),
+                "multiplicity": copy.deepcopy(r.get("multiplicity") or {}),
+                "integrity": copy.deepcopy(r.get("integrity") or {}),
+                "temporal": self._namespace_value(r.get("temporal")),
+            }
             self._add(Concept(
                 id=self._p(rid), kind=ConceptKind.relation, name=r.get("name") or rid,
-                semantics=r.get("semantics"), synonyms=_syn(r.get("synonyms")),
-                attrs={"from_entity": self._p(r.get("from_entity")), "from_key": r.get("from_key"),
-                       "to_entity": self._p(r.get("to_entity")), "to_key": r.get("to_key")},
+                semantics=r.get("semantics"), synonyms=_syn(r.get("synonyms")), attrs=attrs,
             ))
 
         for m in g.get("metrics", []):
             mid = m.get("id")
             if not mid:
                 continue
-            # 前缀：metric id + expr 内嵌的 attribute token。
+            expression = m.get("expression")
             self._add(Concept(
                 id=self._p(mid), kind=ConceptKind.metric, name=m.get("name") or mid,
                 semantics=m.get("semantics"), synonyms=_syn(m.get("synonyms")),
-                attrs={"expr": self._pexpr(m.get("expr"))},
+                attrs={"expression": self._namespace_value(expression),
+                       "result_type": m.get("result_type"), "unit": m.get("unit")},
             ))
 
         for d in g.get("derivations", []):

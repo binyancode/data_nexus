@@ -12,7 +12,7 @@ router = APIRouter()
 @api_handler.auth()
 @api_handler.service()
 async def ask(request: Request, nexus: NexusClient = None):
-    """一句话提问 → 立即返回 run_id，后台执行四段引擎；前端据 run_id 轮询 nexus.run/run_stage/run_node 看进度。
+    """一句话提问 → 立即返回 run_id，后台执行五段引擎；前端据 run_id 轮询 nexus.run/run_stage/run_node 看进度。
 
     as_user 优先取自认证身份（request.state.identity），否则回退请求体。
     """
@@ -21,6 +21,8 @@ async def ask(request: Request, nexus: NexusClient = None):
     as_user = (identity.user if identity else None) or body.get("as_user")
 
     question = body.get("q")
+    if not isinstance(question, str) or not question.strip():
+        return {"state": "error", "message": "问题不能为空"}
     ontology_id = body.get("ontology_id")   # 显式指定；缺省则由 LLM 自动路由
     llm_name = body.get("llm_name")         # 本次运行选中的规划 LLM；缺省用默认
 

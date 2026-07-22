@@ -110,10 +110,8 @@ export function operatorColor(op?: string | null): string {
       return '#0a6b83'
     case 'SELECT':
       return '#2f7cb4'
-    case 'FILTER':
-      return '#00859b'
-    case 'JOIN':
-      return '#6a5acd'
+    case 'CALCULATE':
+      return '#7456c8'
     case 'SEARCH':
       return '#168aad'
     case 'BROWSE':

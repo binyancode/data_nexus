@@ -2,8 +2,7 @@
 
 覆盖四层数据：
   - 本体：Concept / Binding
-  - 查询：SQGNode / SQG（语义查询图）
-  - 计划：PlanNode / QueryPlan（优化器产物）
+    - 计划：PhysicalExecutionPlan（优化器产物）
   - 结果：NodeResult / LineageItem / Answer
   - 执行上下文：ExecContext
 """
@@ -65,132 +64,9 @@ class Ontology(BaseModel):
     updated_at: Optional[str] = None
 
 
-# ─────────────────────────── 查询（SQG） ───────────────────────────
-class Operator(str, Enum):
-    SELECT = "SELECT"      # 取明细
-    FILTER = "FILTER"      # 过滤条件
-    AGGREGATE = "AGGREGATE"  # 聚合指标
-    JOIN = "JOIN"          # 关联
-    SEARCH = "SEARCH"      # 搜索公开信息源（如 Web IQ Web Search）
-    BROWSE = "BROWSE"      # 读取指定文档/URL（如 Web IQ Browse）
-    ASK = "ASK"            # 问一个 Agent
-    ACT = "ACT"            # 执行动作
-    PROJECT = "PROJECT"    # 从合并节点结果里取一列（优化器融合后的拆分）
-
-
-class SQGNode(BaseModel):
-    """语义查询图节点。"""
-    id: str
-    operator: Operator
-    name: str = ""                       # 业务名（如「华东毛利」）
-    concept: Optional[str] = None        # 主概念 id（如 metric.gross_margin）
-    params: dict[str, Any] = Field(default_factory=dict)  # 过滤/分组/聚合等参数
-    depends_on: list[str] = Field(default_factory=list)
-
-    def result_kind(self) -> str:
-        """结果形态（据算子 + 参数判定，供优化器/生成器统一分派，避免按行结构猜）：
-        search / document / text(ASK) / action(ACT) / list / ranking / scalar。"""
-        if self.operator == Operator.SEARCH:
-            return "search"
-        if self.operator == Operator.BROWSE:
-            return "document"
-        if self.operator == Operator.ASK:
-            return "text"
-        if self.operator == Operator.ACT:
-            return "action"
-        p = self.params or {}
-        if p.get("group_by"):
-            return "ranking" if (p.get("measure") or self.concept) else "list"
-        return "scalar"
-
-
-class SQG(BaseModel):
-    """语义查询图：一次提问翻成的统一查询指令（nodes + context）。"""
-    question: str
-    nodes: list[SQGNode] = Field(default_factory=list)
-    context: dict[str, Any] = Field(default_factory=dict)  # 编译器 → 优化器 交接包
-
-    def node(self, node_id: str) -> Optional[SQGNode]:
-        return next((n for n in self.nodes if n.id == node_id), None)
-
-
-# ─────────────────────────── 计划（优化器产物） ───────────────────────────
-class PlanNode(BaseModel):
-    """物理执行节点：选中的 Resolver + 具体调用，自带结构（前端据此独立画 flow）。"""
-    id: str
-    operator: Operator
-    name: str = ""
-    resolver: str = ""                    # 选中的 resolver 名
-    call: dict[str, Any] = Field(default_factory=dict)  # 传给 resolver.fetch 的调用描述（如 {sql: ...}）
-    depends_on: list[str] = Field(default_factory=list)
-    wave: int = 1                         # 第几波（优化器拓扑分波算好）
-
-
-class QueryPlan(BaseModel):
-    """物理执行计划（与 SQG 同信封：nodes + context）。"""
-    nodes: list[PlanNode] = Field(default_factory=list)
-    context: dict[str, Any] = Field(default_factory=dict)  # 优化器 → 协调器 交接包
-
-
-# ───────────────── 取数规格（方言中立，优化器 → resolver 交接） ─────────────────
-class QueryJoin(BaseModel):
-    """一条 JOIN：把某表按 on_left = on_right 接进来。"""
-    table: str
-    alias: str
-    on_left: str        # 如 "t0.customer_id"
-    on_right: str       # 如 "t1.id"
-
-
-class QueryFilter(BaseModel):
-    """一条过滤：列引用 + 归一化算子 + 值（IN 时 value 为 list）。"""
-    col: str            # 已解析的列引用（多表时带别名前缀）
-    op: str             # 归一化算子：= <> > >= < <= LIKE IN
-    value: Any = None
-    value_format: Optional[str] = None   # 日期值的格式（token 式，如 yyyy-MM-dd）；非日期为 None
-
-
-class QueryHaving(BaseModel):
-    """聚合后过滤（HAVING）。"""
-    expr: str           # 已解析的聚合值表达式
-    op: str
-    value: Any = None
-
-
-class QuerySelect(BaseModel):
-    """一个输出测度列。
-
-    - P1（同过滤多测度）：直接给 `expr`，渲染成 `expr AS alias`。
-    - P2（不同过滤条件聚合）：给 `agg`+`inner`+`filters`，渲染成
-      `agg(CASE WHEN <filters> THEN inner END) AS alias`（一次扫描分流）。
-    """
-    alias: str          # 输出列名（如 v_n1）
-    expr: str = ""      # P1：完整聚合表达式（已解析成物理列）
-    agg: Optional[str] = None                 # P2：聚合函数 SUM/AVG/MIN/MAX/COUNT
-    inner: Optional[str] = None               # P2：被聚合的内层表达式（物理列）
-    filters: list["QueryFilter"] = Field(default_factory=list)  # P2：该测度专属过滤 → CASE WHEN
-
-
-class QuerySpec(BaseModel):
-    """方言中立的取数规格。
-
-    优化器负责把逻辑概念解析成物理绑定（表/列/JOIN/别名/表达式），产出本规格；
-    具体 SQL 文本由 resolver.compile 按各自方言渲染，优化器不再拼 SQL 字符串。
-    """
-    value_expr: str = ""                  # 单测度聚合表达式（selects 非空时忽略）
-    selects: list[QuerySelect] = Field(default_factory=list)  # 多测度融合；非空则走多列渲染
-    label_expr: Optional[str] = None      # 分组维度列引用（None = 不分组）
-    from_table: str = ""                  # 首实体物理表
-    from_alias: Optional[str] = None      # 多表时首表别名（None = 单表不带别名）
-    joins: list[QueryJoin] = Field(default_factory=list)
-    filters: list[QueryFilter] = Field(default_factory=list)
-    order: str = "DESC"                   # ASC / DESC（仅分组时用）
-    limit: Optional[int] = None           # TopN（仅分组时用）
-    having: Optional[QueryHaving] = None
-
-
 def topo_waves(nodes: list) -> list[list]:
     """按 depends_on 拓扑分波：返回 [[wave1节点...], [wave2...], ...]。
-    适用于任何带 .id / .depends_on 的节点（SQGNode / PlanNode 均可）。"""
+    适用于任何带 .id / .depends_on 的逻辑或物理节点。"""
     ids = {n.id for n in nodes}
     done: set = set()
     remaining = list(nodes)
@@ -256,6 +132,7 @@ class ExecContext:
         self.cancellation_token = cancellation_token
         self.started_at = time.time()
         self.results: dict[str, NodeResult] = {}   # node_id -> NodeResult
+        self.physical_results: dict[str, NodeResult] = {}  # PEP fragment id -> physical result
         self.context: dict[str, Any] = {}          # 引擎间交接包（携 plan.context）
         self.stage_logs: dict[str, Any] = {}        # 当前 stage 的自定义日志（JSON），每段前清空
         self.compute: Any = None                    # 跨源内存计算引擎（ComputeEngine），协调器按需创建

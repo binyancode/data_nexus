@@ -136,6 +136,7 @@ import { listLlms, type LlmItem } from '../bff/Llms.js'
 import NexusRuntime from './runtime/NexusRuntime.vue'
 import MarkdownContent from './common/MarkdownContent.vue'
 import type { RuntimeAnswer } from './runtime/dag'
+import { formatLineageValue, hasMarkdown, isUrlValue } from './runtime/lineageFormat'
 
 interface Cell {
   label: string
@@ -145,15 +146,11 @@ interface Cell {
 }
 
 function isUrl(value: string): boolean {
-  return /^https?:\/\//i.test(value || '')
+  return isUrlValue(value)
 }
 
 function sameLineageUrl(item: Cell): boolean {
   return isUrl(item.value) && item.value === item.source
-}
-
-function hasMarkdown(value: string): boolean {
-  return /(^|\n)\s*(#{1,6}\s|[-*+]\s|\d+\.\s|>\s|\|.+\||```)|\*\*[^*]+\*\*|__[^_]+__/m.test(value || '')
 }
 
 const question = ref('')
@@ -215,7 +212,7 @@ function onRuntimeDone(a: RuntimeAnswer) {
   answerText.value = a.text
   lineage.value = (a.lineage || []).map((li) => ({
     label: li.label,
-    value: li.value == null ? '—' : String(li.value),
+    value: formatLineageValue(li.value),
     source: li.source,
     detail: li.detail || '',
   }))

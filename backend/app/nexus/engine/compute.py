@@ -4,7 +4,7 @@
 - 现在：`DuckDbCompute`（DuckDB `:memory:`）——零外部依赖、进程内。
 - 将来：`SqlDbCompute`（专用临时 SQL 库）——步骤完全一致，只换实现。
 
-优化器仍只产出方言中立的 `QuerySpec`；具体 SQL 由计算引擎按自己的方言渲染，
+优化器只产出方言中立的 typed `QueryIR`；具体 SQL 由计算引擎按自己的方言渲染，
 表名是「已物化的临时表名」（`_table_source` = 纯表名，不像 CSV 包 read_csv）。
 
 每次运行独立一个实例（挂在 ExecContext 上），避免并发 run 的临时表撞名。
@@ -15,7 +15,8 @@ from __future__ import annotations
 import datetime
 from abc import ABC, abstractmethod
 
-from nexus.core.models import QuerySpec
+from nexus.core.physical import QueryIR
+from nexus.resolvers.query_renderer import QueryRenderer
 
 
 class ComputeEngine(ABC):
@@ -27,8 +28,8 @@ class ComputeEngine(ABC):
         ...
 
     @abstractmethod
-    def run(self, spec: QuerySpec, into: str | None = None) -> list[dict]:
-        """编译 QuerySpec→SQL 执行，返回行；into 给定则同时把结果物化成该表。"""
+    def run(self, query: QueryIR, into: str | None = None) -> list[dict]:
+        """编译 QueryIR→SQL 执行，返回行；into 给定则同时把结果物化成该表。"""
         ...
 
     def close(self) -> None:
@@ -75,8 +76,9 @@ class DuckDbCompute(ComputeEngine):
             [[r.get(c) for c in cols] for r in rows],
         )
 
-    def run(self, spec: QuerySpec, into: str | None = None) -> list[dict]:
-        sql, params = self._render(spec)
+    def run(self, query: QueryIR, into: str | None = None) -> list[dict]:
+        rendered = QueryRenderer(table_source=lambda name: f'"{name}"').render(query)
+        sql, params = rendered.sql, rendered.params
         if into:
             self._con.execute(f'DROP TABLE IF EXISTS "{into}"')
             self._con.execute(f'CREATE TABLE "{into}" AS {sql}', params)
@@ -91,53 +93,3 @@ class DuckDbCompute(ComputeEngine):
             self._con.close()
         except Exception:
             pass
-
-    # ── QuerySpec → DuckDB SQL（表名=已物化临时表，不做 read_csv 包裹）──
-    def _cond(self, f, params: list) -> str:
-        if f.op == "IN":
-            vals = f.value if isinstance(f.value, list) else [f.value]
-            params.extend(vals)
-            return f"{f.col} IN ({','.join(['?'] * len(vals))})"
-        params.append(f.value)
-        return f"{f.col} {f.op} ?"
-
-    def _render(self, spec: QuerySpec) -> tuple[str, list]:
-        if spec.from_alias:
-            from_sql = f'"{spec.from_table}" {spec.from_alias}'
-            for j in spec.joins:
-                from_sql += f' JOIN "{j.table}" {j.alias} ON {j.on_left} = {j.on_right}'
-        else:
-            from_sql = f'"{spec.from_table}"'
-
-        params: list = []
-        where = [self._cond(f, params) for f in spec.filters]
-        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-
-        if not spec.value_expr and not spec.selects:
-            # 纯连接/投影：取全部列（列名已在各 fetch 里加实体前缀去重）
-            return f"SELECT * FROM {from_sql}{where_sql}", params
-
-        if spec.selects:
-            cols = ", ".join(f"{s.expr} AS {s.alias}" for s in spec.selects)
-            head = (f"{spec.label_expr} AS label, " if spec.label_expr else "") + cols
-            sql = f"SELECT {head} FROM {from_sql}{where_sql}"
-            if spec.label_expr:
-                sql += f" GROUP BY {spec.label_expr}"
-            return sql, params
-
-        # 聚合
-        if spec.label_expr:
-            sql = f"SELECT {spec.label_expr} AS label, {spec.value_expr} AS value FROM {from_sql}{where_sql}"
-            sql += f" GROUP BY {spec.label_expr}"
-            if spec.having:
-                sql += f" HAVING {spec.value_expr} {spec.having.op} ?"
-                params.append(spec.having.value)
-            sql += f" ORDER BY value {spec.order}"
-            if spec.limit:
-                sql += f" LIMIT {int(spec.limit)}"
-        else:
-            sql = f"SELECT {spec.value_expr} AS value FROM {from_sql}{where_sql}"
-            if spec.having:
-                sql += f" HAVING {spec.value_expr} {spec.having.op} ?"
-                params.append(spec.having.value)
-        return sql, params

@@ -19,6 +19,7 @@ from nexus.engine.compiler import Compiler
 from nexus.engine.optimizer import Optimizer
 from nexus.engine.coordinator import Coordinator
 from nexus.engine.generator import Generator
+from nexus.core.relations import RelationContract
 
 _logger = get_logger("nexus")
 
@@ -147,6 +148,13 @@ class NexusClient:
                       description: Optional[str], graph: dict) -> bool:
         if not self._owned(ontology_id, user):
             return False
+        if graph.get("version") != 3:
+            return False
+        for relation in graph.get("relations", []) or []:
+            RelationContract.model_validate(relation)
+            confirmation = relation.get("confirmation") or {}
+            if confirmation.get("required") and not confirmation.get("confirmed"):
+                return False
         self.repo.save(ontology_id, name, description, graph)
         return True
 
@@ -165,10 +173,7 @@ class NexusClient:
 
     # ── 数据源探测 / 导入 ──
     def list_resolvers(self) -> list:
-        return [{"name": r.name, "type": r.resolver_type,
-                 "provides_concepts": r.provides_concepts,
-                 "operators": sorted(r.operators)}
-                for r in self.registry.all_resolvers()]
+        return [r.capabilities() for r in self.registry.all_resolvers()]
 
     def list_llms(self) -> list:
         """规划用 LLM 目录（name + is_default），供提问界面下拉。"""

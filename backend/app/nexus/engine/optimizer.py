@@ -1,807 +1,682 @@
-"""优化器：逻辑 SQG → 物理执行计划（多节点 / 多算子）。
-
-- AGGREGATE：据指标 concept 的绑定拼下推 SQL（选中数据源）。
-- SEARCH / BROWSE：路由到 Web 搜索/网页读取能力源。
-- ASK：路由到 agent（LLM）resolver，call 带回填用的 prompt。
-- ACT：路由到 action resolver，call 带动作 + 描述。
-resolver 选择优先看 concept 绑定，缺失则按 registry 里的 resolver 类型兜底。
-分波（wave）由 depends_on 拓扑排序算出。
-"""
+"""Clean-break optimizer: typed SQG -> binding -> logical IR -> fragment PEP."""
 
 from __future__ import annotations
 
-import json
-import re
-from typing import Optional
+from collections import defaultdict
+from typing import Any, Optional
 
-from nexus.core.models import (
-    SQG, QueryPlan, PlanNode, Operator, ExecContext, topo_waves,
-    QuerySpec, QueryJoin, QueryFilter, QueryHaving, QuerySelect,
+from nexus.core.expressions import (
+    AggregateExpr, AggregateFunction, AttributeExpr, CaseExpr, ColumnExpr, LiteralExpr, Predicate,
+    aggregate_functions, combine_conjuncts, expression_attributes, OutputExpr,
+    predicate_attributes, predicate_key, split_conjuncts,
 )
-from nexus.ontology.store import OntologyStore
-from nexus.engine.relations import join_tree
-
-# 表达式里引用属性概念的记号，如 attribute.sales.amount（可带本体命名空间前缀 onto_x::）
-_ATTR_TOKEN = re.compile(r"(?:[A-Za-z0-9_]+::)?attribute(?:\.[A-Za-z0-9_]+)+")
-
-# 过滤操作符白名单（防注入）；键=LLM 给的 op，值=拼进 SQL 的算子
-_FILTER_OPS = {"=": "=", "!=": "<>", "<>": "<>", ">": ">", ">=": ">=",
-               "<": "<", "<=": "<=", "like": "LIKE", "in": "IN"}
-# 临时聚合允许的函数；以及各函数对 dtype 的要求
-_AGG_FUNCS = {"SUM", "AVG", "MIN", "MAX", "COUNT"}
-_AGG_NEEDS_NUMBER = {"SUM", "AVG"}
+from nexus.core.intermediate import (
+    BoundLogicalPlan, OptimizationTrace, PlanCandidate, RuleDecision,
+    SemanticBindingArtifact, SemanticTaskBinding,
+)
+from nexus.core.logical import (
+    ActNode, AggregateNode, AskNode, BrowseNode, CalculateNode, MetricMeasure,
+    Operator, OrderKey, SearchNode, SelectNode, SQG, StatisticMeasure,
+)
+from nexus.core.models import ExecContext, topo_waves
+from nexus.core.physical import (
+    CapabilityFragment, ComputeFragment, ComputeInput, LogicalOutputBinding,
+    ExchangeFragment, PhysicalExecutionPlan, QueryIR, QueryJoin, QueryOutput, QuerySource,
+    SourceFragment,
+)
+from nexus.engine.binder import Binder, BindingError
 
 
 class Optimizer:
-    def __init__(self, ontology: OntologyStore, registry=None, allowed: Optional[set] = None):
+    def __init__(self, ontology, registry=None, allowed: Optional[set] = None):
         self.ontology = ontology
         self.registry = registry
-        # 本次运行允许使用的 resolver 名集合（本体作用域）；None = 不限制（兼容/测试）
         self.allowed = set(allowed) if allowed is not None else None
+        self.binder = Binder(ontology)
+        self.trace = OptimizationTrace()
 
-    def _allowed(self, name: Optional[str]) -> bool:
+    def _allowed(self, name: str | None) -> bool:
         return bool(name) and (self.allowed is None or name in self.allowed)
 
-    def plan(self, sqg: SQG, ctx: Optional[ExecContext] = None) -> QueryPlan:
-        nodes: list[PlanNode] = []
+    def plan(self, sqg: SQG, ctx: Optional[ExecContext] = None) -> PhysicalExecutionPlan:
+        binding, logical = self.binder.bind(sqg)
+        if ctx is not None:
+            ctx.stage_logs["artifacts"] = {
+                "semantic_binding": binding.model_dump(mode="json"),
+                "bound_logical_plan": logical.model_dump(mode="json"),
+            }
+        plan = self._physical(sqg, binding, logical)
+        self._waves(plan)
+        self.trace.selected_plan = "selected"
+        self.trace.candidates.append(PlanCandidate(
+            id="selected", strategy="fragment_pep",
+            logical_nodes=list(logical.outputs), selected=True,
+            reason="lowest safe plan among generated candidates",
+        ))
+        if ctx is not None:
+            ctx.stage_logs["artifacts"].update({
+                "physical_execution_plan": plan.model_dump(mode="json"),
+                "optimization_trace": self.trace.model_dump(mode="json"),
+            })
+        return plan
 
-        # 第一层（无依赖）AGGREGATE 参与融合优化；其余节点常规处理。
-        first_ids = {n.id for n in sqg.nodes
-                     if n.operator == Operator.AGGREGATE and not n.depends_on}
-        resolved = []                       # [(sqgnode, spec, resolver)]
-        for n in sqg.nodes:
-            if n.id not in first_ids:
+    def _physical(self, sqg: SQG, binding: SemanticBindingArtifact,
+                  logical: BoundLogicalPlan) -> PhysicalExecutionPlan:
+        task_bindings = {task.logical_node: task for task in binding.tasks}
+        structured = [node for node in sqg.nodes if isinstance(node, (SelectNode, AggregateNode))]
+        plan_nodes: list[Any] = []
+        physical_for_logical: dict[str, str] = {}
+
+        grouped: dict[tuple, list] = defaultdict(list)
+        for task in structured:
+            task_binding = task_bindings[task.id]
+            if len(task_binding.source_instances) == 1 and not self._requires_compute(task, task_binding, logical):
+                grouped[self._fusion_key(task, task_binding)].append(task)
+            else:
+                fragments = self._cross_source(task, task_binding, logical)
+                plan_nodes.extend(fragments)
+                physical_for_logical[task.id] = fragments[-1].id
+
+        for group in grouped.values():
+            if len(group) > 1 and all(isinstance(task, AggregateNode) for task in group):
+                fragments = self._fused_aggregates(group, task_bindings, logical)
+                plan_nodes.extend(fragments)
+                for task in group:
+                    physical_for_logical[task.id] = next(
+                        fragment.id for fragment in reversed(fragments)
+                        if any(item.logical_node == task.id for item in fragment.realizes)
+                    )
+            else:
+                for task in group:
+                    fragment = self._single_source(task, task_bindings[task.id], logical)
+                    plan_nodes.append(fragment)
+                    physical_for_logical[task.id] = fragment.id
+
+        for task in sqg.nodes:
+            if isinstance(task, (SelectNode, AggregateNode)):
                 continue
-            if self._is_list_node(n):               # 纯列举维度：不参与聚合融合，单独规划
-                nodes.append(self._plan_aggregate(n, ctx))
-                continue
-            if self._is_cross_source(n):            # 跨源：分解成 fetch + join + 聚合
-                nodes += self._plan_cross_source(n, sqg, ctx)
-                continue
-            ok, reason = self._agg_spec(n)
-            if ok:
-                resolved.append((n, ok[0], ok[1]))
-            else:                           # 无法规划 → 失败节点（不静默丢弃）
-                nodes.append(self._failed_agg(n.id, n.name, list(n.depends_on), reason))
-        nodes += self._fuse_aggregates(resolved, sqg, ctx)
+            dependencies = list(dict.fromkeys(
+                physical_for_logical[dep] for dep in task.depends_on if dep in physical_for_logical
+            ))
+            fragment = self._calculate(task, dependencies) if isinstance(task, CalculateNode) \
+                else self._capability(task, dependencies)
+            plan_nodes.append(fragment)
+            physical_for_logical[task.id] = fragment.id
 
-        for n in sqg.nodes:
-            if n.id in first_ids:
-                continue                    # 已在融合里处理
-            pn = self._plan_node(n, ctx)
-            if pn:
-                nodes.append(pn)
-
-        waves = topo_waves(nodes)
-        for w, wave_nodes in enumerate(waves, start=1):
-            for pn in wave_nodes:
-                pn.wave = w
-
-        context = {
-            "as_user": ctx.as_user if ctx else None,
-            "max_wave": len(waves),
-            "parallelism": 4,
-            "placeholder": "brace",
-        }
-        return QueryPlan(nodes=nodes, context=context)
-
-    # ── 分派 ──
-    def _plan_node(self, node, ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
-        if node.operator == Operator.AGGREGATE:
-            return self._plan_aggregate(node, ctx)
-        if node.operator == Operator.SEARCH:
-            return self._plan_search(node)
-        if node.operator == Operator.BROWSE:
-            return self._plan_browse(node)
-        if node.operator == Operator.ASK:
-            return self._plan_ask(node)
-        if node.operator == Operator.ACT:
-            return self._plan_act(node)
-        return None
-
-    # ── AGGREGATE → 下推 SQL ──
-    @staticmethod
-    def _is_list_node(node) -> bool:
-        """纯列举：无指标、无度量，只给 group_by 维度 → 去重列出该维度的所有取值。"""
-        return node.result_kind() == "list"
-
-    def _plan_aggregate(self, node, ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
-        ok, reason = self._agg_spec(node)
-        if not ok:
-            return self._failed_agg(node.id, node.name, list(node.depends_on), reason)
-        spec, resolver = ok
-        return self._compile_agg_node(node.id, node.name, spec, resolver,
-                                      list(node.depends_on), ctx)
-
-    # 失败节点：无法规划取数时产出一个带错因的节点（协调器会标红，不静默消失）
-    def _failed_agg(self, node_id, name, depends_on, reason) -> PlanNode:
-        return PlanNode(
-            id=node_id, operator=Operator.AGGREGATE, name=name, resolver="",
-            call={"node_id": node_id, "error": reason or "无法生成取数计划"},
-            depends_on=depends_on,
+        contracts = {task.id: task.spec.result for task in sqg.nodes if hasattr(task.spec, "result")}
+        return PhysicalExecutionPlan(
+            nodes=plan_nodes, logical_results=contracts,
+            context={"parallelism": 4, "logical_to_physical": physical_for_logical},
         )
 
-    # ── 跨源：检测 + 分解（各源单独 fetch → 计算引擎里 join → 原聚合算子在合并结果上跑）──
-    def _referenced_entities(self, node) -> list:
-        """本聚合直接引用到的实体（measure/group_by/filters 里出现的属性所属实体），保序。"""
-        expr = self._aggregate_expr(node)
-        if not expr:
-            return []
-        ids = list(_ATTR_TOKEN.findall(expr))
-        if node.params.get("group_by"):
-            ids.append(node.params["group_by"])
-        for f in node.params.get("filters", []) or []:
-            if f.get("concept"):
-                ids.append(f["concept"])
-        out: list = []
-        for tid in ids:
-            c = self.ontology.get_concept(tid)
-            ent = c.attrs.get("entity") if c else None
-            if ent and ent not in out:
-                out.append(ent)
-        return out
-
-    def _is_cross_source(self, node) -> bool:
-        """跨源判定：把被引用实体用关系图连通（含中间表），只要连接链上任一实体
-        与其它实体不同源，即按跨源处理。"""
-        ents = self._referenced_entities(node)
-        if len(ents) <= 1:
+    def _requires_compute(self, task, binding: SemanticTaskBinding,
+                          logical: BoundLogicalPlan) -> bool:
+        if not isinstance(task, AggregateNode):
             return False
-        tree = join_tree(self.ontology, ents)
-        if tree is None:
-            return False                    # 连不通 → 交给下游产失败节点（不在此拦）
-        ordered, _ = tree
-        resolvers = {self._entity_binding(e)[1] for e in ordered}
-        resolvers.discard(None)
-        return len(resolvers) > 1
+        expression = self._logical_aggregate(task.id, logical).aggregate
+        required = aggregate_functions(expression)
+        resolver = self._resolver(binding.source_instances[0])
+        supported = set((resolver.capabilities().get("relational") or {}).get("aggregates") or [])
+        missing = required - supported
+        if missing:
+            self.trace.rules.append(RuleDecision(
+                rule="source_aggregate_pushdown", outcome="rejected", logical_nodes=[task.id],
+                reason="source does not support required aggregate(s)",
+                details={"missing": sorted(missing), "source": resolver.name},
+            ))
+        return bool(missing)
+
+    def _fusion_key(self, task, binding: SemanticTaskBinding) -> tuple:
+        dimensions = [d.model_dump_json() for d in task.spec.dimensions] if isinstance(task, AggregateNode) else []
+        domain_policy = task.spec.domain_policy.unmatched if isinstance(task, AggregateNode) else "EXCLUDE_UNMATCHED"
+        return (
+            tuple(binding.source_instances), tuple(entity.concept for entity in binding.entities),
+            tuple(relation.concept for relation in binding.relations), tuple(dimensions), domain_policy,
+        )
 
     @staticmethod
-    def _local(entity_id: str) -> str:
-        return re.sub(r"[^A-Za-z0-9_]", "_", entity_id.split(".")[-1]) or "e"
+    def _aliases(binding: SemanticTaskBinding) -> dict[str, str]:
+        return {entity.concept: f"t{index}" for index, entity in enumerate(binding.entities)}
 
-    def _galias(self, entity_id: str, col: str) -> str:
-        return re.sub(r"[^A-Za-z0-9_]", "_", f"{self._local(entity_id)}__{col}")
-
-    def _plan_cross_source(self, node, sqg: SQG, ctx: Optional[ExecContext] = None) -> list:
-        """跨源聚合分解：每源一个 FETCH（下推自己的过滤、列名加实体前缀去重）→ 一个
-        JOIN 节点在计算引擎里合并 → 原聚合节点(id=node.id)在合并结果上做 group/agg/having/top。"""
-        def fail(reason):
-            return [self._failed_agg(node.id, node.name, list(node.depends_on), reason)]
-
-        expr = self._aggregate_expr(node)
-        if not expr:
-            return fail("无法确定聚合口径")
-        filters = node.params.get("filters", []) or []
-        group_by = node.params.get("group_by")
-        order = (node.params.get("order") or "desc").lower()
-        order = "ASC" if order == "asc" else "DESC"
-        try:
-            limit = int(node.params.get("limit")) if node.params.get("limit") is not None else None
-        except (TypeError, ValueError):
-            limit = None
-        having = self._clean_having(node.params.get("having"))
-
-        # 解析 measure 里的属性 token → (entity, col)
-        tokens = list(dict.fromkeys(_ATTR_TOKEN.findall(expr)))
-        info: dict[str, tuple[str, str]] = {}
-        ent_order: list[str] = []
-        for tid in tokens:
-            c = self.ontology.get_concept(tid)
-            col = self._attr_column(tid)
-            ent = c.attrs.get("entity") if c else None
-            if not (c and col and ent):
-                return fail(f"属性未解析/未绑定列：{tid}")
-            info[tid] = (ent, col)
-            if ent not in ent_order:
-                ent_order.append(ent)
-
-        group_ent = group_col = None
-        if group_by:
-            gc = self.ontology.get_concept(group_by)
-            group_col = self._attr_column(group_by)
-            group_ent = gc.attrs.get("entity") if gc else None
-            if not (gc and group_col and group_ent):
-                return fail(f"分组维度未解析/未绑定列：{group_by}")
-            if group_ent not in ent_order:
-                ent_order.append(group_ent)
-
-        # 过滤按所属实体归类（各自下推）
-        filt_by_ent: dict[str, list] = {}
-        for f in filters:
-            cid = f.get("concept")
-            col = self._attr_column(cid)
-            c = self.ontology.get_concept(cid) if cid else None
-            fent = c.attrs.get("entity") if c else None
-            if not (col and fent):
-                continue
-            if fent not in ent_order:
-                ent_order.append(fent)
-            op = _FILTER_OPS.get((f.get("op") or "=").lower(), "=")
-            filt_by_ent.setdefault(fent, []).append(
-                QueryFilter(col=col, op=op, value=f.get("value"), value_format=f.get("value_format")))
-
-        # 用关系图把被引用实体连通（含中间表）：ent_order 扩为整条链，edges 为连接树
-        tree = join_tree(self.ontology, ent_order)
-        if tree is None:
-            return fail("跨源聚合缺少关系(relation)：被引用的实体之间没有任何通路。请在本体连上外键关系。")
-        ent_order, edges = tree
-
-        # 实体 → (表, resolver)
-        meta: dict[str, dict] = {}
-        for ent in ent_order:
-            table, rsv = self._entity_binding(ent)
-            if not table:
-                return fail(f"实体未绑定物理表：{ent}")
-            if not self._allowed(rsv):
-                return fail(f"数据源不在本体允许集：{rsv}")
-            meta[ent] = {"table": table, "resolver": rsv}
-
-        # 每实体需要取的列 = 被引用列 + join 键（中间表通常只取 join 键）
-        needed = {e: set() for e in ent_order}
-        for _, (e, col) in info.items():
-            needed[e].add(col)
-        if group_ent:
-            needed[group_ent].add(group_col)
-        for e, flist in filt_by_ent.items():
-            for qf in flist:
-                needed[e].add(qf.col)
-        for (fe, fk, te, tk) in edges:
-            needed[fe].add(fk)
-            needed[te].add(tk)
-
-        # FETCH 节点（各源下推过滤，列名加实体前缀去重）；表名=fetch 节点 id
-        out_nodes: list = []
-        fetch_id: dict[str, str] = {}
-        for i, ent in enumerate(ent_order):
-            rsv = meta[ent]["resolver"]
-            robj = self.registry.resolver(rsv) if self.registry else None
-            if robj is None:
-                return fail(f"resolver 缺失：{rsv}")
-            selects = [QuerySelect(alias=self._galias(ent, col), expr=col)
-                       for col in sorted(needed[ent])]
-            fspec = QuerySpec(from_table=meta[ent]["table"], selects=selects,
-                              filters=filt_by_ent.get(ent, []))
-            fid = self._unique_id(f"f_{node.id}_{i}", sqg)
-            call = robj.compile(fspec)
-            call["node_id"] = fid
-            fetch_id[ent] = fid
-            self._log_node(ctx, fid, fspec, call)
-            out_nodes.append(PlanNode(id=fid, operator=Operator.SELECT,
-                                      name=f"取数·{self._local(ent)}", resolver=rsv,
-                                      call=call, depends_on=[]))
-
-        # JOIN 节点（计算引擎）：各 fetch 结果物化后连接成一张统一表
-        alias_of = {ent_order[0]: "a0"}
-        jjoins = []
-        for k, (fe, fk, te, tk) in enumerate(edges, start=1):
-            new_ent = ent_order[k]
-            alias_of[new_ent] = f"a{k}"
-            jjoins.append(QueryJoin(
-                table=fetch_id[new_ent], alias=alias_of[new_ent],
-                on_left=f"{alias_of[fe]}.{self._galias(fe, fk)}",
-                on_right=f"{alias_of[te]}.{self._galias(te, tk)}",
-            ))
-        join_spec = QuerySpec(from_table=fetch_id[ent_order[0]], from_alias="a0", joins=jjoins)
-        join_tbl = self._unique_id(f"jt_{node.id}", sqg)
-        join_nid = self._unique_id(f"j_{node.id}", sqg)
-        join_call = {
-            "node_id": join_nid,
-            "loads": [{"table": fetch_id[e], "from_node": fetch_id[e]} for e in ent_order],
-            "spec": join_spec.model_dump(),
-            "into": join_tbl,
+    def _query_sources(self, binding: SemanticTaskBinding):
+        aliases = self._aliases(binding)
+        sources = {
+            entity.concept: QuerySource(
+                entity=entity.concept, object_name=entity.object_name,
+                alias=aliases[entity.concept], source_instance=entity.source_instance,
+            ) for entity in binding.entities
         }
-        self._log_node(ctx, join_nid, join_spec, {k: v for k, v in join_call.items() if k != "node_id"})
-        out_nodes.append(PlanNode(id=join_nid, operator=Operator.JOIN, name="跨源连接",
-                                  resolver="(compute)", call=join_call,
-                                  depends_on=[fetch_id[e] for e in ent_order]))
+        return aliases, sources
 
-        # 最终聚合节点（id=逻辑 node.id，计算引擎）：在合并表上 group/agg/having/top
-        resolved_expr = expr
-        for tid in sorted(tokens, key=len, reverse=True):
-            ent, col = info[tid]
-            resolved_expr = resolved_expr.replace(tid, self._galias(ent, col))
-        agg_spec = QuerySpec(
-            from_table=join_tbl,
-            value_expr=resolved_expr,
-            label_expr=(self._galias(group_ent, group_col) if group_ent else None),
-            order=order,
-            limit=(limit if group_ent else None),
-            having=(QueryHaving(expr=resolved_expr, op=having["op"], value=having["value"]) if having else None),
-        )
-        agg_call = {"node_id": node.id, "spec": agg_spec.model_dump()}
-        self._log_node(ctx, node.id, agg_spec, {"spec": "compute"})
-        out_nodes.append(PlanNode(id=node.id, operator=Operator.AGGREGATE, name=node.name,
-                                  resolver="(compute)", call=agg_call, depends_on=[join_nid]))
-        return out_nodes
-
-    def _log_node(self, ctx, node_id, spec, call):
-        if ctx is not None:
-            ctx.stage_logs.setdefault("nodes", {})[node_id] = {
-                "query_spec": spec.model_dump(), "call": call,
-            }
-
-
-    # 解析一个 AGGREGATE 节点 → ((QuerySpec, resolver) | None, reason)；不编译（供融合先分组）
-    def _agg_spec(self, node):
-        if self._is_list_node(node):                 # 纯列举维度（去重），无聚合函数
-            order = (node.params.get("order") or "asc").lower()
-            order = "DESC" if order == "desc" else "ASC"
-            try:
-                limit = int(node.params["limit"]) if node.params.get("limit") is not None else None
-            except (TypeError, ValueError):
-                limit = None
-            rank = {"group_by": node.params.get("group_by"), "order": order,
-                    "limit": limit, "having": None}
-            resolved = self._resolve_attr_aggregate("", node.params.get("filters", []), rank)
-            if isinstance(resolved, str):
-                return None, resolved
-            if resolved is None:
-                return None, "无法解析列举维度"
-            spec, resolver = resolved
-            if not self._allowed(resolver):
-                return None, f"数据源不在本体允许集：{resolver}"
-            return (spec, resolver), None
-        expr = self._aggregate_expr(node)
-        if not expr:
-            return None, "无法确定聚合口径（需要有效的指标或度量属性）"
-        filters = node.params.get("filters", [])
-        group_by = node.params.get("group_by")
-        order = (node.params.get("order") or "desc").lower()
-        order = "ASC" if order == "asc" else "DESC"
-        limit = node.params.get("limit")
-        try:
-            limit = int(limit) if limit is not None else None
-        except (TypeError, ValueError):
-            limit = None
-        having = self._clean_having(node.params.get("having"))
-        rank = {"group_by": group_by, "order": order, "limit": limit, "having": having} \
-            if (group_by or having) else None
-        resolved = self._resolve_attr_aggregate(expr, filters, rank)
-        if isinstance(resolved, str):
-            return None, resolved                      # 具体原因（如缺少关系）
-        if resolved is None:
-            return None, "无法解析取数（检查属性绑定/度量类型）"
-        spec, resolver = resolved
-        if not self._allowed(resolver):
-            return None, f"数据源不在本体允许集：{resolver}"
-        return (spec, resolver), None
-
-    # QuerySpec + resolver → PlanNode（编译成 call + 落 logs）
-    def _compile_agg_node(self, node_id, name, spec, resolver, depends_on,
-                          ctx: Optional[ExecContext] = None) -> Optional[PlanNode]:
-        robj = self.registry.resolver(resolver) if self.registry else None
-        if robj is None:
-            return None
-        call = robj.compile(spec)
-        call["node_id"] = node_id
-        # 记录本节点的 QuerySpec 与 resolver 编译出的调用语句（落 optimizer stage 的 logs）
-        if ctx is not None:
-            ctx.stage_logs.setdefault("nodes", {})[node_id] = {
-                "query_spec": spec.model_dump(),
-                "call": {k: v for k, v in call.items() if k != "node_id"},
-            }
-        return PlanNode(
-            id=node_id, operator=Operator.AGGREGATE, name=name, resolver=resolver,
-            call=call, depends_on=depends_on,
-        )
-
-    # ── 融合调度：同一次扫描（同源/表/JOIN/分组）内，按过滤情形派发 P1 / P2 ──
-    def _fuse_aggregates(self, resolved: list, sqg: SQG,
-                         ctx: Optional[ExecContext] = None) -> list:
-        groups: dict[str, list] = {}
-        order: list[str] = []
-        for node, spec, resolver in resolved:
-            # 安全前提：无 TopN、无 HAVING 才可融合（否则单独一个节点）
-            if spec.limit is not None or spec.having is not None:
-                key = f"__solo__{node.id}"
-            else:
-                key = self._scan_key(spec, resolver)      # 不含 filters：同一次扫描
-            if key not in groups:
-                groups[key] = []
-                order.append(key)
-            groups[key].append((node, spec, resolver))
-
-        out: list = []
-        seq = [0]                                        # 合并节点计数（可变，供递归共享）
-        for key in order:
-            out += self._merge_scan_group(groups[key], sqg, ctx, seq)
-        return out
-
-    def _merge_scan_group(self, members: list, sqg: SQG, ctx, seq: list) -> list:
-        """一个「同扫描」组：同过滤→P1；不同过滤且全单聚合→P2；否则按过滤再分组退回 P1。"""
-        if len(members) == 1:
-            node, spec, resolver = members[0]
-            pn = self._compile_agg_node(node.id, node.name, spec, resolver,
-                                        list(node.depends_on), ctx)
-            return [pn] if pn else []
-
-        same_filter = len({self._filters_key(s) for (_, s, _) in members}) == 1
-        if same_filter:
-            return self._merge_p1(members, sqg, ctx, seq)
-
-        parts = [self._split_single_agg(s.value_expr) for (_, s, _) in members]
-        if all(parts):
-            return self._merge_p2(members, parts, sqg, ctx, seq)
-
-        # 退化：过滤不同 + 有复合口径（难改写 CASE）→ 按过滤再分组，各子组走 P1
-        subs: dict[str, list] = {}
-        suborder: list[str] = []
-        for item in members:
-            k = self._filters_key(item[1])
-            if k not in subs:
-                subs[k] = []
-                suborder.append(k)
-            subs[k].append(item)
-        out: list = []
-        for k in suborder:
-            out += self._merge_scan_group(subs[k], sqg, ctx, seq)
-        return out
-
-    # P1：同过滤、只测度不同 → 过滤上提 WHERE，多测度 select（任意测度/复合口径都行）
-    def _merge_p1(self, members: list, sqg: SQG, ctx, seq: list) -> list:
-        _, base_spec, resolver = members[0]
-        selects = [QuerySelect(alias=f"v_{n.id}", expr=s.value_expr) for (n, s, _) in members]
-        merged_spec = base_spec.model_copy(update={"selects": selects})
-        return self._emit_merge(members, merged_spec, resolver, sqg, ctx, seq, "P1")
-
-    # P2：不同过滤、全单聚合 → agg(CASE WHEN 各自过滤 THEN inner END)，一次扫描分流
-    def _merge_p2(self, members: list, parts: list, sqg: SQG, ctx, seq: list) -> list:
-        _, base_spec, resolver = members[0]
-        selects = []
-        for (n, s, _), (agg, inner) in zip(members, parts):
-            selects.append(QuerySelect(alias=f"v_{n.id}", agg=agg, inner=inner, filters=s.filters))
-        # 合并节点 WHERE 清空（过滤都进了各自 CASE）；保留 from/join/label
-        merged_spec = base_spec.model_copy(update={"selects": selects, "filters": []})
-        return self._emit_merge(members, merged_spec, resolver, sqg, ctx, seq, "P2")
-
-    # 产出：一个合并节点 + 每逻辑 id 一个 PROJECT 拆分节点（P1/P2 共用）
-    def _emit_merge(self, members, merged_spec, resolver, sqg, ctx, seq, tag) -> list:
-        seq[0] += 1
-        merged_id = self._unique_id(f"m{seq[0]}", sqg)
-        mname = "合并取数：" + "+".join(n.name for (n, _, _) in members)
-        mpn = self._compile_agg_node(merged_id, mname, merged_spec, resolver, [], ctx)
-        if mpn is None:                              # 合并失败：退回各自单节点
-            out = []
-            for (n, s, rsv) in members:
-                p = self._compile_agg_node(n.id, n.name, s, rsv, list(n.depends_on), ctx)
-                if p:
-                    out.append(p)
-            return out
-        out = [mpn]
-        for (n, s, rsv) in members:
-            out.append(PlanNode(
-                id=n.id, operator=Operator.PROJECT, name=n.name, resolver="(merge)",
-                call={"node_id": n.id, "from": merged_id, "column": f"v_{n.id}"},
-                depends_on=[merged_id],
-            ))
-        return out
-
-    def _scan_key(self, spec: QuerySpec, resolver: str) -> str:
-        """同一次扫描的键：同源/表/JOIN/分组（不含 filters —— P2 允许过滤不同）。"""
-        return json.dumps({
-            "r": resolver,
-            "from": spec.from_table, "alias": spec.from_alias,
-            "joins": [j.model_dump() for j in spec.joins],
-            "label": spec.label_expr,
-        }, sort_keys=True, ensure_ascii=False, default=str)
-
-    def _filters_key(self, spec: QuerySpec) -> str:
-        return json.dumps([f.model_dump() for f in spec.filters],
-                          sort_keys=True, ensure_ascii=False, default=str)
-
-    _SINGLE_AGG = re.compile(r"\s*(SUM|AVG|MIN|MAX|COUNT)\s*\((.+)\)\s*$", re.IGNORECASE)
-
-    def _split_single_agg(self, expr: str):
-        """把 `AGG(inner)` 拆成 (AGG, inner)；复合口径（SUM(a)-SUM(b) 等）返回 None。"""
-        m = self._SINGLE_AGG.fullmatch(expr or "")
-        if not m:
-            return None
-        inner = m.group(2)
-        depth = 0                                    # 校验 inner 括号平衡、不提前闭合
-        for ch in inner:
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth < 0:
-                    return None
-        if depth != 0:
-            return None
-        return m.group(1).upper(), inner
-
-    def _unique_id(self, base: str, sqg: SQG) -> str:
-        existing = {n.id for n in sqg.nodes}
-        cand, i = base, 0
-        while cand in existing:
-            i += 1
-            cand = f"{base}_{i}"
-        return cand
-
-    # 取聚合表达式：优先 metric 口径；否则用 measure 属性 + agg 函数（临时聚合）
-    def _aggregate_expr(self, node) -> Optional[str]:
-        metric = self.ontology.get_concept(node.concept) if node.concept else None
-        if metric and metric.attrs.get("expr"):
-            return metric.attrs["expr"]
-        # 临时聚合：{measure: attribute.*, agg: SUM/AVG/MIN/MAX/COUNT}
-        measure = node.params.get("measure")
-        if not measure:
-            return None
-        mc = self.ontology.get_concept(measure)
-        if not mc:
-            return None
-        agg = (node.params.get("agg") or "SUM").upper()
-        if agg not in _AGG_FUNCS:
-            return None
-        dtype = mc.attrs.get("dtype")
-        if agg in _AGG_NEEDS_NUMBER:
-            # SUM/AVG：只对数值度量有意义
-            if mc.attrs.get("role") != "measure" or dtype not in (None, "number"):
-                return None
-            if mc.attrs.get("additivity") == "non_additive" and agg == "SUM":
-                return None   # 比率/百分比等不可加：禁 SUM
-        # MIN/MAX/COUNT：对任意属性（数值/日期/文本/维度）都合法，不要求 role=measure
-        if agg == "COUNT" and node.params.get("distinct"):
-            return f"COUNT(DISTINCT {measure})"   # 去重计数（有多少种/多少个不同的 X）
-        return f"{agg}({measure})"
-
-    def _clean_having(self, having):
-        """having: {op, value} → 规整；非法/缺失返回 None。"""
-        if not isinstance(having, dict):
-            return None
-        op = _FILTER_OPS.get((having.get("op") or "").lower())
-        if op is None or op == "IN" or op == "LIKE":   # HAVING 只支持比较
-            op = ">" if op is None else op
-        if having.get("value") in (None, ""):
-            return None
-        return {"op": op, "value": having.get("value")}
-
-    # 属性表达式 → SQL（多实体自动 JOIN）；expr 为空 = 列举模式（只出 group_by 维度，无聚合）
-    def _resolve_attr_aggregate(self, expr: str, filters: list, rank: Optional[dict] = None):
-        list_mode = not expr
-        tokens = list(dict.fromkeys(_ATTR_TOKEN.findall(expr))) if expr else []
-        if not list_mode and not tokens:
-            return "聚合表达式里没有可解析的属性"
-        info: dict[str, tuple[str, str]] = {}     # attr_id -> (entity_id, column)
-        ent_order: list[str] = []
-        for tid in tokens:
-            c = self.ontology.get_concept(tid)
-            col = self._attr_column(tid)
-            ent = c.attrs.get("entity") if c else None
-            if not (c and col and ent):
-                return f"属性无法解析或未绑定物理列：{tid}"
-            info[tid] = (ent, col)
-            if ent not in ent_order:
-                ent_order.append(ent)
-
-        # 分组维度（group_by）：解析其实体/列，必要时并入 JOIN
-        group_ent = group_col = None
-        if rank and rank.get("group_by"):
-            gc = self.ontology.get_concept(rank["group_by"])
-            group_col = self._attr_column(rank["group_by"])
-            group_ent = gc.attrs.get("entity") if gc else None
-            if not (gc and group_col and group_ent):
-                return f"分组维度无法解析或未绑定列：{rank['group_by']}"
-            if group_ent not in ent_order:
-                ent_order.append(group_ent)
-
-        # 过滤属性可能引入新实体（度量/维度过滤，跨实体自动 JOIN）
-        for f in (filters or []):
-            fc = self.ontology.get_concept(f.get("concept")) if f.get("concept") else None
-            fent = fc.attrs.get("entity") if fc else None
-            if fent and fent not in ent_order and self._attr_column(f.get("concept")):
-                ent_order.append(fent)
-
-        # 用关系图把被引用实体连通（含中间表）：ent_order 扩为整条链，tree_edges 为连接树
-        tree = join_tree(self.ontology, ent_order)
-        if tree is None:
-            return ("跨表聚合缺少关系(relation)：被引用的实体之间没有任何通路。"
-                    "请在本体画布上连上对应的外键关系。")
-        ent_order, tree_edges = tree
-
-        # 实体 → 表/resolver/别名
-        meta: dict[str, dict] = {}
-        resolver = None
-        for i, ent in enumerate(ent_order):
-            table, rsv = self._entity_binding(ent)
-            if not table:
-                return f"实体未绑定物理表：{ent}"
-            resolver = resolver or rsv
-            meta[ent] = {"table": table, "resolver": rsv, "alias": f"t{i}"}
-        single = len(ent_order) == 1
-
-        def col_ref(ent: str, col: str) -> str:
-            return col if single else f'{meta[ent]["alias"]}.{col}'
-
-        # 替换表达式里的属性记号（长的优先，避免前缀重叠）
-        resolved_expr = expr
-        for tid in sorted(tokens, key=len, reverse=True):
-            ent, col = info[tid]
-            resolved_expr = resolved_expr.replace(tid, col_ref(ent, col))
-
-        # FROM / JOIN（结构化，别名/关系已解析；具体 SQL 由 resolver 渲染）
-        first = ent_order[0]
-        from_table = meta[first]["table"]
-        from_alias = None if single else meta[first]["alias"]
+    def _query_joins(self, binding: SemanticTaskBinding, aliases, sources,
+                     unmatched_policy: str = "EXCLUDE_UNMATCHED") -> list[QueryJoin]:
         joins: list[QueryJoin] = []
-        if not single:
-            for k in range(1, len(ent_order)):
-                ent = ent_order[k]
-                fe, fk, te, tk = tree_edges[k - 1]
+        joined = {binding.entities[0].concept}
+        remaining = list(binding.relations)
+        while remaining:
+            progressed = False
+            for relation in list(remaining):
+                frm, to = relation.from_entity, relation.to_entity
+                if frm in joined and to not in joined:
+                    target, left_ids, right_ids = to, relation.from_attributes, relation.to_attributes
+                    traversal_min, traversal_max = relation.from_to.min, relation.from_to.max
+                elif to in joined and frm not in joined:
+                    target, left_ids, right_ids = frm, relation.to_attributes, relation.from_attributes
+                    traversal_min, traversal_max = relation.to_from.min, relation.to_from.max
+                else:
+                    continue
                 joins.append(QueryJoin(
-                    table=meta[ent]["table"], alias=meta[ent]["alias"],
-                    on_left=f'{meta[fe]["alias"]}.{fk}',
-                    on_right=f'{meta[te]["alias"]}.{tk}',
+                    relation=relation.concept, source=sources[target],
+                    left=[self.binder.bind_expression(AttributeExpr(concept=value), aliases) for value in left_ids],
+                    right=[self.binder.bind_expression(AttributeExpr(concept=value), aliases) for value in right_ids],
+                    join_type=self._join_type(relation, traversal_min, unmatched_policy),
+                    cardinality=str(traversal_max),
                 ))
-
-        filter_specs = self._build_where(filters, meta, single)
-
-        # 分组 / 排序 / TopN / HAVING
-        rank = rank or {}
-        group_ok = bool(group_ent and group_col)
-        having = None
-        if rank.get("having"):
-            having = QueryHaving(
-                expr=resolved_expr,
-                op=rank["having"]["op"], value=rank["having"]["value"],
-            )
-        spec = QuerySpec(
-            value_expr=resolved_expr,
-            label_expr=col_ref(group_ent, group_col) if group_ok else None,
-            from_table=from_table, from_alias=from_alias,
-            joins=joins, filters=filter_specs,
-            order=rank.get("order", "DESC"),
-            limit=rank.get("limit") if group_ok else None,
-            having=having,
-        )
-        return spec, resolver
-
-    # 过滤条件 → QueryFilter 列表（维度/度量均可过滤；op 白名单；多实体时加别名前缀）
-    def _build_where(self, filters: list, meta: dict, single: bool) -> list:
-        out: list[QueryFilter] = []
-        for f in (filters or []):
-            cid = f.get("concept")
-            col = self._attr_column(cid)
-            if not col:
-                continue
-            c = self.ontology.get_concept(cid) if cid else None
-            ent = c.attrs.get("entity") if c else None
-            # 属性不属于本次查询的实体 → 跳过（避免拼出不存在的列）
-            if ent and ent not in meta:
-                continue
-            if not single and ent in meta:
-                col = f'{meta[ent]["alias"]}.{col}'
-            op = _FILTER_OPS.get((f.get("op") or "=").lower(), "=")
-            value = f.get("value")
-            if op == "IN":
-                vals = value if isinstance(value, list) else [value]
-                vals = [v for v in vals if v not in (None, "")]
-                if not vals:
-                    continue
-                out.append(QueryFilter(col=col, op=op, value=vals))
-            else:
-                if value in (None, ""):
-                    continue
-                out.append(QueryFilter(col=col, op=op, value=value,
-                                       value_format=f.get("value_format")))
-        return out
-
-    # ── SEARCH / BROWSE → Web 能力源 ──
-    def _plan_search(self, node) -> PlanNode:
-        resolver = self._concept_resolver(node.concept)
-        if not self._allowed(resolver):
-            resolver = self._first_with_operator("SEARCH")
-        if not resolver:
-            return self._failed_capability(node, "没有可用的 Web 搜索能力源")
-        call = {"node_id": node.id, "mode": "search"}
-        for key in ("query", "max_results", "language", "region", "max_length",
-                    "content_format", "location", "include_adult"):
-            if key in node.params:
-                call[key] = node.params[key]
-        return PlanNode(id=node.id, operator=node.operator, name=node.name,
-                        resolver=resolver, call=call, depends_on=list(node.depends_on))
-
-    def _plan_browse(self, node) -> PlanNode:
-        resolver = self._concept_resolver(node.concept)
-        if not self._allowed(resolver):
-            resolver = self._first_with_operator("BROWSE")
-        if not resolver:
-            return self._failed_capability(node, "没有可用的网页浏览能力源")
-        call = {"node_id": node.id, "mode": "browse"}
-        for key in ("url", "max_length", "live_crawl", "render_dynamic_pages",
-                    "include_web_links", "include_image_links", "language", "region",
-                    "content_format"):
-            if key in node.params:
-                call[key] = node.params[key]
-        return PlanNode(id=node.id, operator=node.operator, name=node.name,
-                        resolver=resolver, call=call, depends_on=list(node.depends_on))
+                joined.add(target)
+                remaining.remove(relation)
+                progressed = True
+            if not progressed:
+                raise BindingError("relation tree could not be oriented")
+        return joins
 
     @staticmethod
-    def _failed_capability(node, reason: str) -> PlanNode:
-        return PlanNode(id=node.id, operator=node.operator, name=node.name, resolver="",
-                        call={"node_id": node.id, "error": reason},
-                        depends_on=list(node.depends_on))
+    def _logical_aggregate(task_id: str, logical: BoundLogicalPlan):
+        return next(node for node in logical.nodes
+                    if task_id in node.origin_sqg_nodes and node.kind.value == "AGGREGATE")
 
-    # ── ASK → agent(LLM) ──
-    def _plan_ask(self, node) -> Optional[PlanNode]:
-        resolver = self._concept_resolver(node.concept)
-        if not self._allowed(resolver):
-            resolver = self._first_with_operator("ASK")
-        if not resolver:
-            return None
-        prompt = node.params.get("prompt") or node.params.get("ask") or ""
-        call = {"node_id": node.id, "prompt": prompt}
-        if node.params.get("system"):
-            call["system"] = node.params["system"]
-        return PlanNode(
-            id=node.id, operator=node.operator, name=node.name, resolver=resolver,
-            call=call, depends_on=list(node.depends_on),
+    def _aggregate_parts(self, task: AggregateNode, binding: SemanticTaskBinding,
+                         logical: BoundLogicalPlan):
+        aliases, sources = self._query_sources(binding)
+        logical_node = self._logical_aggregate(task.id, logical)
+        dimensions = [
+            QueryOutput(name=name, expression=self.binder.bind_expression(expr, aliases))
+            for name, expr in logical_node.dimensions
+        ]
+        aggregate = self.binder.bind_expression(logical_node.aggregate, aliases)
+        predicate = self.binder.bind_predicate(task.spec.scope, aliases)
+        result_predicate = task.spec.result_filter
+        order: list[OrderKey] = []
+        limit = None
+        if task.spec.ranking:
+            order = [
+                OrderKey(field=task.spec.ranking.by, direction=task.spec.ranking.direction, nulls="LAST"),
+                *task.spec.ranking.tie_breakers,
+            ]
+            limit = task.spec.ranking.take
+        return aliases, sources, dimensions, aggregate, predicate, result_predicate, order, limit
+
+    def _single_source(self, task, binding: SemanticTaskBinding,
+                       logical: BoundLogicalPlan) -> SourceFragment:
+        aliases, sources = self._query_sources(binding)
+        if isinstance(task, SelectNode):
+            outputs = [
+                QueryOutput(name=field.output,
+                            expression=self.binder.bind_expression(AttributeExpr(concept=field.concept), aliases))
+                for field in task.spec.fields
+            ]
+            query = QueryIR(
+                source=sources[binding.entities[0].concept],
+                joins=self._query_joins(binding, aliases, sources),
+                predicate=self.binder.bind_predicate(task.spec.scope, aliases),
+                outputs=outputs, distinct=task.spec.distinct,
+            )
+        else:
+            _, _, dimensions, aggregate, predicate, result_predicate, order, limit = \
+                self._aggregate_parts(task, binding, logical)
+            query = QueryIR(
+                source=sources[binding.entities[0].concept],
+                joins=self._query_joins(binding, aliases, sources, task.spec.domain_policy.unmatched), predicate=predicate,
+                dimensions=dimensions,
+                outputs=[QueryOutput(name=task.spec.measure.output, aggregate=aggregate)],
+                result_predicate=result_predicate, order_by=order, limit=limit,
+            )
+        resolver = self._resolver(binding.source_instances[0])
+        fragment_id = f"p_{task.id}"
+        fragment = SourceFragment(
+            id=fragment_id, name=task.name, source_instance=resolver.name,
+            query=query, call={"node_id": fragment_id, **resolver.compile(query)},
+            realizes=[LogicalOutputBinding(logical_node=task.id, physical_result="result_set")],
         )
+        self.trace.rules.append(RuleDecision(
+            rule="single_source_pushdown", outcome="applied", logical_nodes=[task.id],
+            reason="all required entities are in one source instance",
+        ))
+        return fragment
 
-    # ── ACT → action ──
-    def _plan_act(self, node) -> Optional[PlanNode]:
-        resolver, expr = self._concept_resolver_expr(node.concept)
-        if not self._allowed(resolver):
-            resolver = self._first_with_operator("ACT")
-        if not resolver:
-            return None
-        call = {
-            "node_id": node.id,
-            "action": expr or node.params.get("action") or "create_task",
-            "desc": node.params.get("desc") or node.params.get("title") or "",
-        }
-        if node.params.get("assignee"):
-            call["assignee"] = node.params["assignee"]
-        return PlanNode(
-            id=node.id, operator=node.operator, name=node.name, resolver=resolver,
-            call=call, depends_on=list(node.depends_on),
+    def _fused_aggregates(self, tasks: list[AggregateNode], bindings: dict[str, SemanticTaskBinding],
+                          logical: BoundLogicalPlan) -> list[Any]:
+        base_binding = bindings[tasks[0].id]
+        aliases, sources = self._query_sources(base_binding)
+        dimensions = []
+        aggregates: list[tuple[AggregateNode, AggregateExpr, Predicate | None]] = []
+        for task in tasks:
+            _, _, task_dimensions, aggregate, predicate, _, _, _ = \
+                self._aggregate_parts(task, bindings[task.id], logical)
+            dimensions = dimensions or task_dimensions
+            aggregates.append((task, aggregate, predicate))
+
+        conjunct_sets = [
+            {predicate_key(value): value for value in split_conjuncts(predicate)}
+            for _, _, predicate in aggregates
+        ]
+        common_keys = set(conjunct_sets[0])
+        for values in conjunct_sets[1:]:
+            common_keys &= set(values)
+        common = [conjunct_sets[0][key] for key in sorted(common_keys)]
+        outputs = []
+        for index, (task, aggregate, _) in enumerate(aggregates):
+            remaining = [value for key, value in conjunct_sets[index].items() if key not in common_keys]
+            branch_filter = combine_conjuncts(remaining)
+            if branch_filter is not None:
+                aggregate = self._condition_expression(aggregate, branch_filter)
+            outputs.append(QueryOutput(name=task.id, aggregate=aggregate))
+        query = QueryIR(
+            source=sources[base_binding.entities[0].concept],
+            joins=self._query_joins(base_binding, aliases, sources, tasks[0].spec.domain_policy.unmatched),
+            predicate=combine_conjuncts(common), dimensions=dimensions, outputs=outputs,
         )
-
-    # ── 绑定/注册表查询 ──
-    def _entity_binding(self, entity_id: Optional[str]):
-        if not entity_id:
-            return None, None
-        for b in self.ontology.get_bindings(entity_id):
-            if b.kind == "table":
-                return b.expr, b.resolver
-        return None, None
-
-    def _attr_column(self, attr_id: Optional[str]) -> Optional[str]:
-        if not attr_id:
-            return None
-        for b in self.ontology.get_bindings(attr_id):
-            if b.kind == "column":
-                return b.expr
-        return None
-
-    def _concept_resolver(self, concept_id: Optional[str]) -> Optional[str]:
-        if not concept_id:
-            return None
-        for b in self.ontology.get_bindings(concept_id):
-            if b.resolver:
-                return b.resolver
-        return None
-
-    def _concept_resolver_expr(self, concept_id: Optional[str]):
-        if not concept_id:
-            return None, None
-        for b in self.ontology.get_bindings(concept_id):
-            if b.resolver:
-                return b.resolver, b.expr
-        return None, None
-
-    def _first_of_type(self, rtype: str) -> Optional[str]:
-        if not self.registry:
-            return None
-        rs = self.registry.resolvers_of_type(rtype)
-        return rs[0].name if rs else None
-
-    def _first_with_operator(self, op: str) -> Optional[str]:
-        """在允许集内，找第一个能执行算子 op 的 resolver（按算子能力，不看类型名）。"""
-        if not self.registry:
-            return None
-        for r in self.registry.all_resolvers():
-            if not self._allowed(r.name):
+        resolver = self._resolver(base_binding.source_instances[0])
+        fragment_id = "p_fused_" + "_".join(task.id for task in tasks)
+        direct_tasks = [task for task in tasks if task.spec.ranking is None and task.spec.result_filter is None]
+        fragment = SourceFragment(
+            id=fragment_id, name="融合取数：" + " + ".join(task.name for task in tasks),
+            source_instance=resolver.name, query=query,
+            call={"node_id": fragment_id, **resolver.compile(query)},
+            realizes=[
+                LogicalOutputBinding(logical_node=task.id,
+                                     logical_field=task.spec.measure.output,
+                                     physical_field=task.id)
+                for task in direct_tasks
+            ],
+        )
+        self.trace.rules.extend([
+            RuleDecision(rule="common_predicate_extraction", outcome="applied",
+                         logical_nodes=[task.id for task in tasks],
+                         reason=f"extracted {len(common)} common conjunct(s)"),
+            RuleDecision(rule="multi_measure_fusion", outcome="applied",
+                         logical_nodes=[task.id for task in tasks],
+                         reason="same source, relation path and grain"),
+        ])
+        fragments: list[Any] = [fragment]
+        for task in tasks:
+            if task in direct_tasks:
                 continue
-            if op in getattr(r, "operators", set()):
-                return r.name
-        return None
+            table = f"x_{task.id}_shared"
+            source = QuerySource(entity=fragment.id, object_name=table, alias="s0", source_instance="compute")
+            dimension_outputs = [
+                QueryOutput(name=dimension.name,
+                            expression=ColumnExpr(source="s0", name=dimension.name))
+                for dimension in dimensions
+            ]
+            value_name = task.spec.measure.output
+            result_predicate = self._post_predicate(task.spec.result_filter, "s0", value_name, value_name)
+            order = ([OrderKey(field=value_name, direction=task.spec.ranking.direction),
+                      *task.spec.ranking.tie_breakers] if task.spec.ranking else [])
+            branch_query = QueryIR(
+                source=source, dimensions=dimension_outputs,
+                outputs=[QueryOutput(name=value_name,
+                                     expression=ColumnExpr(source="s0", name=task.id))],
+                predicate=result_predicate, order_by=order,
+                limit=task.spec.ranking.take if task.spec.ranking else None,
+            )
+            branch_id = f"p_{task.id}_post"
+            fragments.append(ComputeFragment(
+                id=branch_id, name=task.name,
+                inputs=[ComputeInput(table=table, from_fragment=fragment.id)],
+                query=branch_query, depends_on=[fragment.id],
+                realizes=[LogicalOutputBinding(logical_node=task.id, physical_result="result_set")],
+            ))
+        return fragments
+
+    def _post_predicate(self, predicate, source: str, physical_value: str, logical_value: str):
+        if predicate is None:
+            return None
+        def bind_expression(expression):
+            if getattr(expression, "kind", None) == "output":
+                name = physical_value if expression.name == logical_value else expression.name
+                return OutputExpr(name=name)
+            return expression
+        if getattr(predicate, "kind", None) == "comparison":
+            return predicate.model_copy(update={
+                "left": bind_expression(predicate.left), "right": bind_expression(predicate.right),
+            })
+        if getattr(predicate, "kind", None) in ("and", "or"):
+            return predicate.model_copy(update={
+                "operands": [self._post_predicate(value, source, physical_value, logical_value)
+                             for value in predicate.operands],
+            })
+        return predicate
+
+    def _cross_source(self, task, binding: SemanticTaskBinding,
+                      logical: BoundLogicalPlan) -> list[Any]:
+        aliases = self._aliases(binding)
+        logical_aggregate = self._logical_aggregate(task.id, logical) if isinstance(task, AggregateNode) else None
+        preaggregate = self._preaggregate_candidate(task, binding, logical_aggregate)
+        fragments: list[SourceFragment] = []
+        source_entities: dict[str, list] = defaultdict(list)
+        for entity in binding.entities:
+            source_entities[entity.source_instance].append(entity)
+        for index, (source_name, entities) in enumerate(source_entities.items()):
+            root = entities[0]
+            columns = [attribute for attribute in binding.attributes if attribute.source_instance == source_name]
+            relation_attrs = {value for relation in binding.relations
+                              for value in [*relation.from_attributes, *relation.to_attributes]}
+            for attribute_id in relation_attrs:
+                attribute = self.binder._attribute(attribute_id)
+                if attribute.source_instance == source_name and all(a.concept != attribute_id for a in columns):
+                    columns.append(attribute)
+            outputs = [
+                QueryOutput(name=f"{self._local(attribute.entity)}__{attribute.column}",
+                            expression=ColumnExpr(source=aliases[attribute.entity], name=attribute.column))
+                for attribute in columns
+            ]
+            source = QuerySource(entity=root.concept, object_name=root.object_name,
+                                 alias=aliases[root.concept], source_instance=source_name)
+            local_entity_ids = {entity.concept for entity in entities}
+            local_joins = []
+            for relation in binding.relations:
+                if relation.from_entity not in local_entity_ids or relation.to_entity not in local_entity_ids:
+                    continue
+                target_entity = relation.to_entity if relation.from_entity == root.concept else relation.from_entity
+                target = next(entity for entity in entities if entity.concept == target_entity)
+                local_joins.append(QueryJoin(
+                    relation=relation.concept,
+                    source=QuerySource(entity=target.concept, object_name=target.object_name,
+                                       alias=aliases[target.concept], source_instance=source_name),
+                    left=[self.binder.bind_expression(AttributeExpr(concept=value), aliases)
+                          for value in relation.from_attributes],
+                    right=[self.binder.bind_expression(AttributeExpr(concept=value), aliases)
+                           for value in relation.to_attributes],
+                    join_type=self._join_type(
+                        relation,
+                        relation.from_to.min if relation.from_entity == root.concept else relation.to_from.min,
+                        task.spec.domain_policy.unmatched if isinstance(task, AggregateNode) else "EXCLUDE_UNMATCHED",
+                    ),
+                    cardinality=f"{relation.to_from.max}:{relation.from_to.max}",
+                ))
+            local_predicates = []
+            if isinstance(task, AggregateNode):
+                for predicate in split_conjuncts(task.spec.scope):
+                    predicate_sources = {self.binder._attribute(value).source_instance
+                                         for value in predicate_attributes(predicate)}
+                    if predicate_sources == {source_name}:
+                        local_predicates.append(self.binder.bind_predicate(predicate, aliases))
+            if preaggregate and preaggregate["source"] == source_name:
+                boundary_attributes = [self.binder._attribute(value) for value in preaggregate["keys"]]
+                dimensions = [
+                    QueryOutput(name=f"{self._local(attribute.entity)}__{attribute.column}",
+                                expression=ColumnExpr(source=aliases[attribute.entity], name=attribute.column))
+                    for attribute in boundary_attributes
+                ]
+                partial = self.binder.bind_expression(logical_aggregate.aggregate, aliases)
+                query = QueryIR(
+                    source=source, joins=local_joins,
+                    predicate=combine_conjuncts(local_predicates), dimensions=dimensions,
+                    outputs=[QueryOutput(name="__partial_value", aggregate=partial)],
+                )
+            else:
+                query = QueryIR(source=source, joins=local_joins,
+                                predicate=combine_conjuncts(local_predicates), outputs=outputs)
+            resolver = self._resolver(source_name)
+            fragment_id = f"p_{task.id}_source_{index}"
+            fragments.append(SourceFragment(
+                id=fragment_id, name=f"取数 {source_name}", source_instance=source_name,
+                query=query, call={"node_id": fragment_id, **resolver.compile(query)},
+            ))
+
+        compute_aliases: dict[str, str] = {}
+        input_sources: list[QuerySource] = []
+        compute_inputs: list[ComputeInput] = []
+        exchanges: list[ExchangeFragment] = []
+        for index, fragment in enumerate(fragments):
+            table = f"x_{task.id}_{index}"
+            exchange_id = f"p_{task.id}_exchange_{index}"
+            exchanges.append(ExchangeFragment(
+                id=exchange_id, name=f"交换 {fragment.source_instance}",
+                mode="BROADCAST" if index > 0 else "MATERIALIZE",
+                from_fragment=fragment.id, into=table, depends_on=[fragment.id],
+            ))
+            source = QuerySource(entity=fragment.id, object_name=table, alias=f"x{index}", source_instance="compute")
+            input_sources.append(source)
+            compute_inputs.append(ComputeInput(table=table, from_fragment=exchange_id))
+            for entity in source_entities[fragment.source_instance]:
+                compute_aliases[entity.concept] = source.alias
+        joins = []
+        root_source = compute_aliases[binding.entities[0].concept]
+        joined_sources = {root_source}
+        remaining_relations = [relation for relation in binding.relations
+                               if compute_aliases[relation.from_entity] != compute_aliases[relation.to_entity]]
+        while remaining_relations:
+            progressed = False
+            for relation in list(remaining_relations):
+                frm_source, to_source = compute_aliases[relation.from_entity], compute_aliases[relation.to_entity]
+                if frm_source in joined_sources and to_source not in joined_sources:
+                    target_source, left_entity, right_entity = to_source, relation.from_entity, relation.to_entity
+                    left_attrs, right_attrs = relation.from_attributes, relation.to_attributes
+                    traversal_min, traversal_max = relation.from_to.min, relation.from_to.max
+                elif to_source in joined_sources and frm_source not in joined_sources:
+                    target_source, left_entity, right_entity = frm_source, relation.to_entity, relation.from_entity
+                    left_attrs, right_attrs = relation.to_attributes, relation.from_attributes
+                    traversal_min, traversal_max = relation.to_from.min, relation.to_from.max
+                else:
+                    continue
+                target = next(source for source in input_sources if source.alias == target_source)
+                joins.append(QueryJoin(
+                    relation=relation.concept, source=target,
+                    left=[ColumnExpr(source=compute_aliases[left_entity],
+                                     name=f"{self._local(left_entity)}__{self.binder._attribute(attr).column}")
+                          for attr in left_attrs],
+                    right=[ColumnExpr(source=compute_aliases[right_entity],
+                                      name=f"{self._local(right_entity)}__{self.binder._attribute(attr).column}")
+                           for attr in right_attrs],
+                    join_type=self._join_type(
+                        relation, traversal_min,
+                        task.spec.domain_policy.unmatched if isinstance(task, AggregateNode) else "EXCLUDE_UNMATCHED",
+                    ),
+                    cardinality=str(traversal_max),
+                ))
+                joined_sources.add(target_source)
+                remaining_relations.remove(relation)
+                progressed = True
+            if not progressed:
+                raise BindingError("cross-source relation tree could not be oriented")
+        if not isinstance(task, AggregateNode):
+            raise BindingError("cross-source SELECT is not supported")
+        def compute_expr(expr):
+            if isinstance(expr, AttributeExpr):
+                attribute = self.binder._attribute(expr.concept)
+                return ColumnExpr(source=compute_aliases[attribute.entity],
+                                  name=f"{self._local(attribute.entity)}__{attribute.column}")
+            if getattr(expr, "kind", None) == "binary":
+                return expr.model_copy(update={"left": compute_expr(expr.left), "right": compute_expr(expr.right)})
+            if getattr(expr, "kind", None) == "time_bucket":
+                return expr.model_copy(update={"value": compute_expr(expr.value)})
+            if isinstance(expr, AggregateExpr):
+                return expr.model_copy(update={"value": compute_expr(expr.value) if expr.value else None})
+            return expr
+
+        dimensions = [QueryOutput(name=name, expression=compute_expr(expr))
+                      for name, expr in logical_aggregate.dimensions]
+        if preaggregate:
+            partial_source = next(source.alias for source, fragment in zip(input_sources, fragments)
+                                  if fragment.source_instance == preaggregate["source"])
+            final_function = AggregateFunction.SUM if preaggregate["function"] == AggregateFunction.COUNT \
+                else preaggregate["function"]
+            aggregate = AggregateExpr(
+                function=final_function,
+                value=ColumnExpr(source=partial_source, name="__partial_value"),
+            )
+        else:
+            aggregate = compute_expr(logical_aggregate.aggregate)
+        query = QueryIR(
+            source=input_sources[0], joins=joins, dimensions=dimensions,
+            outputs=[QueryOutput(name=task.spec.measure.output, aggregate=aggregate)],
+            result_predicate=self._compute_result_predicate(task.spec.result_filter,
+                                                            task.spec.measure.output),
+            order_by=([OrderKey(field=task.spec.ranking.by, direction=task.spec.ranking.direction),
+                       *task.spec.ranking.tie_breakers] if task.spec.ranking else []),
+            limit=task.spec.ranking.take if task.spec.ranking else None,
+        )
+        compute_id = f"p_{task.id}_compute"
+        compute = ComputeFragment(
+            id=compute_id, name=task.name, inputs=compute_inputs, query=query,
+            depends_on=[exchange.id for exchange in exchanges],
+            realizes=[LogicalOutputBinding(logical_node=task.id, physical_result="result_set")],
+        )
+        self.trace.rules.append(RuleDecision(
+            rule="cross_source_fragmentation", outcome="applied", logical_nodes=[task.id],
+            reason="task spans multiple source instances; source projection + DuckDB compute selected",
+            details={"sources": binding.source_instances},
+        ))
+        return [*fragments, *exchanges, compute]
+
+    def _compute_result_predicate(self, predicate, output_name):
+        if predicate is None:
+            return None
+        def expression(value):
+            if isinstance(value, OutputExpr):
+                return OutputExpr(name=output_name if value.name == output_name else value.name)
+            return value
+        if getattr(predicate, "kind", None) == "comparison":
+            return predicate.model_copy(update={"left": expression(predicate.left),
+                                                "right": expression(predicate.right)})
+        if getattr(predicate, "kind", None) in ("and", "or"):
+            return predicate.model_copy(update={
+                "operands": [self._compute_result_predicate(value, output_name)
+                             for value in predicate.operands],
+            })
+        return predicate
+
+    def _preaggregate_candidate(self, task, binding: SemanticTaskBinding, logical_aggregate):
+        if not isinstance(task, AggregateNode) or not isinstance(logical_aggregate.aggregate, AggregateExpr):
+            return None
+        aggregate = logical_aggregate.aggregate
+        if aggregate.function not in {AggregateFunction.SUM, AggregateFunction.COUNT,
+                                      AggregateFunction.MIN, AggregateFunction.MAX}:
+            return None
+        subject = task.spec.subject.entity
+        subject_source = self.binder._entity(subject).source_instance
+        value_sources = {self.binder._attribute(value).source_instance
+                         for value in expression_attributes(aggregate.value)}
+        if value_sources and value_sources != {subject_source}:
+            return None
+        boundary_keys: list[str] = []
+        for relation in binding.relations:
+            from_source = self.binder._entity(relation.from_entity).source_instance
+            to_source = self.binder._entity(relation.to_entity).source_instance
+            if from_source == to_source:
+                continue
+            if from_source == subject_source:
+                maximum = relation.from_to.max
+                keys = relation.from_attributes
+            elif to_source == subject_source:
+                maximum = relation.to_from.max
+                keys = relation.to_attributes
+            else:
+                continue
+            if (maximum != 1 or relation.integrity_mode not in {"ENFORCED", "DECLARED"}
+                    or relation.confidence < 1):
+                self.trace.rules.append(RuleDecision(
+                    rule="cross_source_preaggregation", outcome="rejected", logical_nodes=[task.id],
+                    reason="relation cardinality/integrity does not prove a many-to-one boundary",
+                    details={"relation": relation.concept, "max": maximum,
+                             "integrity": relation.integrity_mode,
+                             "confidence": relation.confidence},
+                ))
+                return None
+            boundary_keys.extend(keys)
+        if not boundary_keys:
+            return None
+        self.trace.rules.append(RuleDecision(
+            rule="cross_source_preaggregation", outcome="applied", logical_nodes=[task.id],
+            reason="decomposable aggregate and trusted many-to-one relation boundary",
+            details={"source": subject_source, "group_keys": boundary_keys},
+        ))
+        return {"source": subject_source, "keys": list(dict.fromkeys(boundary_keys)),
+                "function": aggregate.function}
+
+    def _calculate(self, task: CalculateNode, dependencies: list[str]) -> CapabilityFragment:
+        return CapabilityFragment(
+            id=f"p_{task.id}", name=task.name, operator=Operator.CALCULATE,
+            resolver="(compute)",
+            call={"node_id": f"p_{task.id}", "mode": "calculate",
+                  "spec": task.spec.model_dump(mode="json"),
+                  "input_refs": {name: value.model_dump(mode="json")
+                                 for name, value in task.inputs.items()}},
+            depends_on=dependencies,
+            realizes=[LogicalOutputBinding(logical_node=task.id, physical_result="result_set")],
+        )
+
+    def _capability(self, task, dependencies: list[str]) -> CapabilityFragment:
+        resolver = self._concept_resolver(task)
+        spec = task.spec.model_dump(mode="json", exclude_none=True)
+        call = {
+            "node_id": f"p_{task.id}", **spec,
+            "input_refs": {name: value.model_dump(mode="json")
+                           for name, value in task.inputs.items()},
+        }
+        if isinstance(task, SearchNode):
+            call["mode"] = "search"
+        elif isinstance(task, BrowseNode):
+            call["mode"] = "browse"
+        if isinstance(task, AskNode):
+            call["prompt"] = spec["instruction"]
+        return CapabilityFragment(
+            id=f"p_{task.id}", name=task.name, operator=task.operator,
+            resolver=resolver, call=call, depends_on=dependencies,
+            realizes=[LogicalOutputBinding(logical_node=task.id, physical_result="result")],
+        )
+
+    def _concept_resolver(self, task) -> str:
+        for resolver in self.registry.all_resolvers() if self.registry else []:
+            if self._allowed(resolver.name) and task.operator.value in resolver.operators:
+                return resolver.name
+        raise BindingError(f"no resolver supports {task.operator.value}")
+
+    @staticmethod
+    def _join_type(relation, traversal_min, unmatched_policy: str):
+        if unmatched_policy == "EXCLUDE_UNMATCHED":
+            return "INNER"
+        if unmatched_policy == "KEEP_AS_UNKNOWN":
+            return "LEFT"
+        if unmatched_policy == "ERROR_ON_UNMATCHED":
+            if (traversal_min == 1 and relation.integrity_mode in {"ENFORCED", "DECLARED"}
+                    and relation.confidence >= 1):
+                return "INNER"
+            raise BindingError(
+                f"ERROR_ON_UNMATCHED requires trusted mandatory relation: {relation.concept}"
+            )
+        raise BindingError(f"unknown unmatched policy: {unmatched_policy}")
+
+    def _condition_expression(self, expression, predicate):
+        """Apply a task-local predicate to every aggregate leaf in a metric expression."""
+        if isinstance(expression, AggregateExpr):
+            return expression.model_copy(update={
+                "filter": combine_conjuncts([*split_conjuncts(expression.filter), predicate])
+            })
+        if getattr(expression, "kind", None) == "binary":
+            return expression.model_copy(update={
+                "left": self._condition_expression(expression.left, predicate),
+                "right": self._condition_expression(expression.right, predicate),
+            })
+        raise BindingError("conditional fusion requires aggregate-leaf metric expressions")
+
+    def _resolver(self, name: str):
+        if not self._allowed(name):
+            raise BindingError(f"source is not allowed: {name}")
+        resolver = self.registry.resolver(name) if self.registry else None
+        if resolver is None:
+            raise BindingError(f"resolver not found: {name}")
+        return resolver
+
+    @staticmethod
+    def _local(concept_id: str) -> str:
+        return concept_id.split("::")[-1].split(".")[-1]
+
+    @staticmethod
+    def _waves(plan: PhysicalExecutionPlan) -> None:
+        waves = topo_waves(plan.nodes)
+        for wave_no, nodes in enumerate(waves, start=1):
+            for node in nodes:
+                node.wave = wave_no
+        plan.context["max_wave"] = len(waves)

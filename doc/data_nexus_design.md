@@ -1,1448 +1,1705 @@
 # Data Nexus 设计文档（唯一真相源）
 
-> 一张图 · 一个协议 · 一种查询 —— 联结一切数据、智能体与行动
+> 一张本体图、一张语义任务图、一张物理执行图——联结数据、知识、智能体与行动。
 >
-> 本文档是 Data Nexus 的**唯一设计文档**，覆盖四部分：**第一部分平台/概念设计**（第 0–15 节）、**第二部分后端工程实现**（第 16–29 节）、**第三部分前端设计**（第 30 节）、**第四部分 as-built 实现细化**（第 31–36 节，落地事实，冲突以其为准）。领域模型只在第一部分定义一次，后端/前端一律引用，避免多处漂移。
->
-> 配套 `doc/nexus_platform_ppt.html`（19 页设计稿）必须与本文一致。
+> 本文定义 Data Nexus 的目标架构。配套 UI 规范见 [data_nexus_ui_design.md](data_nexus_ui_design.md)。
+
+## 0. 文档状态与已确定决策
+
+本项目仍处于设计阶段，本轮查询代数与执行计划采用 **clean break**：实现时直接替换旧结构，不保留旧 SQG、`QuerySpec`、`PROJECT` 拆分节点、历史运行记录或缓存的兼容分支。
+
+> **实现状态（2026-07-22）**：本章定义的 clean-break 核心已落地：graph v3 relation/metric、typed Expression/Predicate、业务粒度 SQG、Semantic Binding、Bound Logical Plan、Fragment PEP、`realizes` 逻辑结果映射、同源融合、跨源 Source + DuckDB Compute、可信 N:1 预聚合、typed SQL Server/DuckDB renderer、Optimizer artifacts 和前端双图浏览。**未修改数据库表结构**；Optimizer 三步产物复用已有 `nexus.run_stage.logs` 保存。
+
+已经确定的边界：
+
+1. **SQG 是面向人的“解决问题思路 DAG”**，不是关系代数树。
+2. 一个 SQG 节点是一项可独立命名、可产生中间结论的业务任务；节点粒度以人在图上能一眼理解为准。
+3. 节点内部使用强类型规格完整表达范围、维度、统计、排名和结果契约；不能因为执行效率把多个独立业务任务预先合并。
+4. `FILTER`、`JOIN`、`ALIGN`、`SORT`、`LIMIT`、`PROJECT` 不作为用户可见 SQG 算子。
+5. 多个 SQG 任务是否共享扫描、JOIN、聚合或同一条查询，由 Optimizer 决定。
+6. PEP 是物理 Fragment DAG；一个物理 Fragment 可以通过 `realizes` 实现多个 SQG 结果，不再生成“合并节点 + PROJECT 拆分节点”。
+7. 跨源关系属于一个业务任务内部的语义依赖，不拆成 SQG 节点；Optimizer 根据本体关系生成 Source/Exchange/Compute Fragment。
+8. `ASK` 和 `ACT` 各保持一个高层算子。确定性计算必须由 `AGGREGATE` 或 `CALCULATE` 完成，不能交给 ASK 口算。
+9. 本体关系必须记录方向性基数、可选性和完整性来源。用户新建或编辑关系时必须明确选择；无法确认时必须显式选择“未知”，优化器按保守策略处理。
+
+术语：
+
+| 术语 | 定义 |
+|---|---|
+| **Ontology** | 业务概念、属性、指标、关系、能力及物理绑定构成的语义图 |
+| **SQG** | Semantic Query Graph，面向人的高层业务任务 DAG |
+| **Bound Logical Plan** | Optimizer 内部使用的关系计划；不作为用户思路图展示 |
+| **PEP** | Physical Execution Plan，按执行位置切分后的物理 Fragment DAG |
+| **Source Instance** | 一个具体的 Resolver 注册实例，如某个 SQL 库或某组 CSV，而不是笼统的 resolver 类型 |
+| **Fragment** | 可在同一执行位置一次编译/执行的最大物理子计划 |
+| **Exchange** | Fragment 之间的数据传输、物化或广播边界 |
+| **Logical Result** | SQG 节点产生的业务结果，由 PEP 的 `realizes` 映射到物理输出 |
 
 ---
 
-## 目录
+## 1. 总体架构与运行管线
 
-0. [阅读顺序与核心心智模型](#0-阅读顺序与核心心智模型)
-1. [背景与目标](#1-背景与目标)
-2. [总体架构蓝图](#2-总体架构蓝图)
-3. [知识层：本体（Concept + Binding）](#3-知识层本体concept--binding)
-4. [知识层：自动生成本体](#4-知识层自动生成本体)
-5. [能力层：Resolver](#5-能力层resolver)
-6. [查询语言：SQG（语义查询图）](#6-查询语言sqg语义查询图)
-7. [运行引擎](#7-运行引擎)
-8. [权限与治理](#8-权限与治理)
-9. [分层架构](#9-分层架构)
-10. [端到端示例](#10-端到端示例)
-11. [落地路径 P0–P4](#11-落地路径-p0p4)
-12. [复用现有代码资产](#12-复用现有代码资产)
-13. [价值](#13-价值)
-14. [待深挖问题](#14-待深挖问题)
-15. [附录：完整 JSON 样例](#15-附录完整-json-样例)
+### 1.1 三张图
 
-**第二部分 · 后端工程实现**：16 目标与形态 · 17 技术选型 · 18 总体架构 · 19 本体存储(Azure SQL) · 20 API · 21 SDK · 22 配置与容器 · 23 LLM · 24 可观测性 · 25 错误处理 · 26 测试 · 27 目录结构 · 28 开发阶段 P0–P4 · 29 风险
+Data Nexus 同时维护三种不同目的的图：
 
-**第三部分 · 前端设计**：30 前端设计（待补）
-
-**第四部分 · as-built 实现细化（2026-07）**：31 本体数据模型（role/dtype/additivity、graph JSON、刷新）· 32 AGGREGATE 增强（临时聚合/filter op/TopN/HAVING/可加性）· 33 Resolver 能力与本体作用域 · 34 规划 LLM 按 run 选择 · 35 凭据/LLM/源 管理 · 36 运行入口与工程细节 · 37 取数下沉：QuerySpec + 方言 · 38 CSV 源 + 本地文件凭据(DuckDB) · 39 日期区间过滤 / value_format / 属性描述 · 40 聚合融合优化（合并执行 + 拆分）· 41 自定义日志(logs) · 42 本体命名空间（多本体 id 前缀）
-
----
-
-## 0. 阅读顺序与核心心智模型
-
-Data Nexus 的知识层是一张**语义图（ER / 知识图谱）**，运行层是一条**逻辑 → 物理 → 执行**的查询管线。
-
-### 0.1 知识层：语义图（5 种 kind）
-
-所有本体元素长成同一个形状，靠 `kind` 区分；**物理只落在 entity 和 attribute 两层**，其余纯语义。
-
-| kind | 是什么 | 绑物理？ | 一句话 |
-|---|---|---|---|
-| **entity** | 业务对象 / 图的节点 | ✅ 绑到**表** | 销售、产品、客户、区域 |
-| **attribute** | 隶属于一个 entity 的属性 | ✅ 绑到**列** | 数量、单价、区域名（唯一真正落物理处）|
-| **relation** | 连接两 entity 的边 | ❌ 纯语义 | `attr=attr` + 方向 + 基数(1:1/1:n/n:1) |
-| **metric** | 对 attribute 的聚合表达式 | ❌ 纯语义 | `SUM(attr.sales.qty * attr.product.price)` |
-| **derivation** | 数据产物的上下游血缘边 | ❌ 纯语义 | A、B → C（可向上游追溯）|
-
-> 物理彻底沉底：**Concept 层只用 concept_id 互相引用，看不到任何物理表**；表/列只出现在 entity/attribute 的 Binding 里。
-
-### 0.2 能力层：Resolver（统一执行接口）
-
-数据源 / 智能体 / 动作都实现同一个 Resolver 接口。**注意：Resolver 只出现在物理执行阶段，逻辑层完全不认识它。**
-
-### 0.3 运行层：逻辑 → 物理 → 执行 三段管线
-
-```
-用户提问
-  │
-① Compiler   →  逻辑 SQG DAG        （语义算子 over concept_id；无物理、无 resolver）
-  │
-② Optimizer →  优化后的物理执行 DAG  （= 查询优化器：选源绑 resolver、下推 vs 内存、join 融合）
-  │
-③ Coordinator→  执行结果            （分波并行 + 内存 JOIN + 回填 + 合并 + 裁决）
-  │
-④ Generator  →  答案 + 血缘
-  │
-⑤ Harness    →  自检这轮是否合理；不合理 → 带着问题重来（外层 loop，≤ N 轮，见 §7.5）
+```text
+Ontology：系统知道什么、概念如何关联、落在哪些源
+    ↓
+SQG：解决用户问题需要完成哪些业务步骤
+    ↓
+PEP：这些步骤在哪里执行、如何融合、如何交换数据
 ```
 
-**三条铁律**：
-1. **逻辑 SQG 不含 resolver、不含物理表**——只有 concept_id + 算子。
-2. **join 不是用户表达的，是引擎据 relation 推导的**：同源 → 融进下推 SQL；跨源 → 保留为内存 JOIN 节点。
-3. **Optimizer = 查询优化器**：把逻辑计划优化成物理计划，resolver 到这里才第一次出现。
+三张图不能混用：
 
-> 贯穿全文的示例问题：**「华东上季度毛利为什么下滑、跟华南比差在哪，给份说明，并把复盘任务派给区域负责人。」**
+- Ontology 不记录某一次查询的执行策略。
+- SQG 不出现表名、SQL、Resolver、JOIN 或临时表。
+- PEP 可以自由融合 SQG 节点，但必须保留逻辑输出映射和血缘。
 
----
+### 1.2 五阶段运行管线
 
-## 1. 背景与目标
-
-### 1.1 痛点
-
-老板问「华东上季度为什么下滑？并安排复盘」，今天需要人肉：打开数据库查数 → 翻 Excel → 搜文档 → 找人归因 → 手动建复盘任务。答案散在一堆系统里，每接一个新源都要单独开发，AI Agent 又是另一套接入方式。
-
-### 1.2 目标
-
-用户只需一句话，系统自动完成：
-
-1. **找源 + 跨源查齐**：自动定位能回答的数据源并联合取数。
-2. **综合结论 + 标明出处**：把多源结果合并成一份答案，附血缘。
-3. **顺手执行**：需要时直接触发动作（如自动派复盘任务）。
-
-一句话目标：**把「人肉跨系统」变成「提一句话」。**
-
----
-
-## 2. 总体架构蓝图
-
-```
-┌───────────────────────────────────────────────────────────────┐
-│ 知识层 · 语义图（静态）                                          │
-│   entity / attribute（绑物理）· relation / metric / derivation（纯语义）│
-└───────────────────────────────────────────────────────────────┘
-        ▲ ① Compiler 查本体，产出逻辑 SQG（无 resolver/物理）
-┌───────────────────────────────────────────────────────────────┐
-│ 运行引擎（动态）                                                 │
-│   逻辑SQG ─②Optimizer→ 物理DAG ─③Coordinator→ 结果 ─④Generator→ 答案│
-└───────────────────────────────────────────────────────────────┘
-        ▼ ②③ 查 Binding 选 Resolver、执行时调用 Resolver
-┌───────────────────────────────────────────────────────────────┐
-│ 能力层 · Resolver（静态，只在物理阶段出现）                       │
-│   数据源 Resolver   Agent Resolver   动作 Resolver               │
-└───────────────────────────────────────────────────────────────┘
+```text
+用户问题
+  → Initializer：选择本体、准备可用概念/指标/能力上下文
+  → Compiler：自然语言 → typed SQG
+  → Optimizer：SQG → Bound Logical Plan → PEP
+  → Coordinator：按 PEP 分波并行执行，维护逻辑结果注册表
+  → Generator：确定性表格/Markdown 答案 + 血缘 + 动作回执
 ```
 
+可选 Harness 位于整条管线之外，用于评估一轮结果并决定是否重新编译；它不是 SQG 或 PEP 算子。
+
+### 1.3 不变量
+
+1. 逻辑层只引用 concept id 和逻辑节点输出。
+2. 物理绑定只由 Ontology/Binding 提供，Compiler 不猜表名和列名。
+3. JOIN 路径只从本体 relation 推导，禁止按同名列自动关联。
+4. 任何优化都必须证明结果 schema、grain、domain、NULL 规则和精确性不变。
+5. 数值、日期、排名和派生值必须可复算；LLM 只负责理解和表达。
+6. 用户权限在源头强制；不同用户安全域的扫描不得融合或共享缓存。
+
 ---
 
-## 3. 知识层：语义图本体
+## 2. 本体与关系模型
 
-知识层是一张语义图：**entity 是节点、attribute 挂在节点上、relation 是边、metric 是聚合、derivation 是血缘边**。五种 `kind` 共用同一外壳，各自加专属字段。
+### 2.1 Graph 存储形态
 
-### 3.1 公共外壳
-
-所有 Concept 都有：
+一份本体仍以单块 graph JSON 保存，运行时摊平成 `Concept + Binding`。目标结构：
 
 ```jsonc
 {
-  "id": "metric.gross_margin",   // 唯一标识，命名 kind.name
-  "kind": "metric",              // entity|attribute|relation|metric|derivation
-  "name": "毛利",                 // 业务显示名
-  "semantics": "销售收入 - 销售成本", // 业务含义（供 LLM 消歧）
-  "synonyms": ["毛利额", "gross margin"],
-  "policy": { "sensitivity": "internal", "row_level": true }, // 权限（治理内生）
-  "provenance": { "generated_by": "auto", "confidence": 0.93, "source_ref": "...", "updated_at": "..." }
+  "version": 3,
+  "entities": [],
+  "relations": [],
+  "metrics": [],
+  "derivations": [],
+  "actions": [],
+  "resolvers": []
 }
 ```
 
-> `provenance`（字段）= 单个概念的**物理出处**元数据；别和 `derivation`（kind，数据产物血缘边）混淆。
+概念 kind：
 
-### 3.2 entity（实体，绑表）
+| kind | 含义 | 物理绑定 |
+|---|---|---|
+| `entity` | 业务对象或事件集合 | 表、文件、端点对象 |
+| `attribute` | entity 的字段 | 列或字段路径 |
+| `relation` | entity 之间可导航的业务关系 | 无；端点属性各自有绑定 |
+| `metric` | 可治理、可复算的业务指标 | 无；使用 typed expression |
+| `derivation` | 产物之间的血缘/派生关系 | 可选能力绑定 |
+| `action` | 具名业务动作 | Action Resolver |
 
-图的节点；唯一（和 attribute 一起）真正落物理的地方。
+多本体运行时，所有 concept id 使用 `ontology_id::concept.id` 命名空间；物理表名、列名和 Resolver 名不加此前缀。跨本体没有 relation 时，不允许在一个结构化查询任务中直接聚合。
 
-```jsonc
-{ "id": "entity.sales", "kind": "entity", "name": "销售" }
-// 物理落在它的 Binding：entity.sales → dwh.fact_sales（表）
-```
-
-### 3.3 attribute（属性，绑列，必属于一个 entity）
-
-```jsonc
-{ "id": "attribute.sales.quantity", "kind": "attribute", "name": "数量",
-  "entity": "entity.sales",        // ★ 必填：属于哪个 entity
-  "column": "quantity",            // 物理列名
-  "role": "measure",               // ★ dimension（维度）| measure（度量）
-  "dtype": "number",               // ★ 粗粒度语义类型：number|text|date|bool|unknown
-  "additivity": "additive",        // ★ 仅 measure：additive|semi_additive|non_additive
-  "synonyms": [], "semantics": null }
-// 物理落在它的 Binding：attribute.sales.quantity → fact_sales.quantity（列）
-```
-
-**属性四要素（as-built）**，详见 §31：
-- `role`：`dimension`（可过滤 / 可 group_by）或 `measure`（可计算 / 可过滤）。
-- `dtype`：粗粒度语义类型（`number/text/date/bool/unknown`），由各源在 `describe()` 里把原生 DB 类型映射进来（concept 是语义层，不绑死某库类型表）。
-- `additivity`（仅度量）：可加性——`additive`（任意维度可 SUM）/ `semi_additive`（跨时间不可 SUM，如库存/余额）/ `non_additive`（比率/百分比/单价，禁 SUM）。
-- 导入默认：数值列 → 度量（默认 `additive`）；主键与其它 → 维度。可在编辑器逐字段用下拉改。
-
-
-### 3.4 metric（指标，表达式用 concept_id，纯语义）
-
-metric 的表达式**只引用 attribute 的 concept_id，绝不出现物理表**：
-
-```jsonc
-{ "id": "metric.total_sales", "kind": "metric", "name": "总销售额",
-  "type": "decimal",
-  "expr": "SUM(attr.sales.quantity * attr.product.unit_price)" }
-```
-
-- 物理由引擎派生：把每个 `attr.*` 换成其 Binding 的列，再据 relation 补 join。
-- **可选** Binding：某源直接提供该指标（如 `agent.sales` 直接答「总销售额」）——这是跨源融合的挂点。
-
-### 3.5 relation（关系边：attr=attr + 方向 + 基数，纯语义）
-
-join 的**唯一**来源。连接两个 attribute（外键列），带**基数**和**方向**：
-
-```jsonc
-{ "id": "rel.sales_product", "kind": "relation", "name": "销售↔产品",
-  "left": "attr.sales.product_id",   // 都是 attribute 的 concept_id
-  "right": "attr.product.id",
-  "cardinality": "n:1",              // 1:1 | 1:n | n:1（n:m 用桥 entity 拆两段）
-  "direction": "sales→product",
-  "join_type": "inner" }             // inner|left|right|full，默认 inner
-```
-
-> **基数至关重要**：1:n 关系若先 join 再聚合会 fan-out 重复计数，引擎据此决定「先预聚合再 join」。
-
-### 3.6 derivation（血缘边：A、B → C，纯语义）
-
-数据产物间的上下游 DAG，支持**向上游追溯**：
-
-```jsonc
-{ "id": "deriv.reconciliation", "kind": "derivation", "name": "对账派生",
-  "target": "entity.reconciliation",                       // 下游产物 C
-  "sources": ["entity.sales_actual", "entity.sales_plan"], // 上游 A、B
-  "transform": "对账 = 实际 对比 计划（按区域月度）",
-  "direction": "A,B → C" }
-```
-
-用户问「C 的某数为什么这样」且含追溯意图时，引擎顺 derivation 边**自动生成查 A、B 的节点**。
-
-### 3.7 Binding（只挂 entity / attribute）
-
-Binding 把 **entity → 表、attribute → 列**。**不含 join**（join 归 relation）。
+### 2.2 Entity 与 Attribute
 
 ```jsonc
 {
-  "id": "bind.attr.sales.quantity.dwh",
-  "concept_id": "attr.sales.quantity",   // 反向外键（唯一真相；Concept.bindings 为派生视图）
-  "resolver": "dwh.sql",                 // 由哪个 Resolver 执行
-  "kind": "column",                      // table | column | prompt | file | endpoint
-  "expr": "fact_sales.quantity",         // column: 列；entity 用 table
-  "confidence": 0.95
+  "id": "entity.fact_order",
+  "name": "订单",
+  "resolver": "sales_csv",
+  "table": "fact_order.csv",
+  "key": "order_id",
+  "attributes": [
+    {
+      "id": "attribute.fact_order.amount",
+      "name": "销售额",
+      "column": "amount",
+      "role": "measure",
+      "dtype": "number",
+      "additivity": "additive",
+      "constraints": {
+        "nullable": false,
+        "unique": false,
+        "primary_key": false,
+        "source": "imported"
+      }
+    }
+  ]
 }
 ```
 
-**要点**
+属性语义：
 
-1. **换库/加源只改 Binding，Concept 不动。**
-2. **同一 Concept 可绑多个 Binding = 跨源融合**（一个 attribute/metric 绑多个源）。
-3. **Binding 不再有 `joins` 字段**——表怎么连由 relation 声明、由引擎推导。
-4. 对接目标因 Resolver 而异：SQL 源绑表/列/表达式；Agent 源绑「提问模板」；文件源绑路径；API 源绑端点。
+- `role`: `dimension | measure`。
+- `dtype`: `number | text | date | datetime | bool | unknown`。
+- `additivity`: `additive | semi_additive | non_additive`，仅用于 measure。
+- `constraints` 是源结构事实，用于关系推断和优化证明，不替代 relation。
+- `resolver` 是具体 Source Instance 名；两个实体都使用 SQL Resolver 类型，并不代表它们同源。
 
-### 3.8 编译示例（「总销售额」）
+### 2.3 Metric 使用 typed expression
 
-概念层（纯 concept_id）：`metric.total_sales = SUM(attr.sales.quantity * attr.product.unit_price)`，跨 `entity.sales`、`entity.product` → 引擎找 `rel.sales_product`（n:1）。物理由引擎组装：
+Metric 不再使用需要字符串解析的 SQL-like `expr`，改为方言中立表达式 AST：
 
-```sql
--- 同源（sales、product 同库）→ 下推一条 SQL：
-SELECT SUM(fact_sales.quantity * product.unit_price)
-FROM fact_sales
-JOIN product ON fact_sales.product_id = product.id;   -- 来自 rel.sales_product
+```jsonc
+{
+  "id": "metric.gross_profit",
+  "name": "毛利",
+  "expression": {
+    "kind": "aggregate",
+    "function": "SUM",
+    "value": {
+      "kind": "binary",
+      "operator": "SUBTRACT",
+      "left": { "kind": "attribute", "concept": "attribute.fact_order.amount" },
+      "right": { "kind": "attribute", "concept": "attribute.fact_order.cost" }
+    },
+    "nulls": "IGNORE"
+  },
+  "result_type": "decimal",
+  "unit": "CNY"
+}
 ```
 
-跨源时改为：各源分别取数 → 内存按 `product_id` 做 hash join（n:1 无 fan-out）→ 算表达式（详见第 6、7 节）。
+表达式类型至少包括：
+
+- `attribute`、`literal`、`node_output`；
+- `binary`：加减乘除、`SAFE_DIVIDE`；
+- `case`、`coalesce`、`cast`；
+- `time_bucket`；
+- `aggregate`；
+- 必要时的窗口表达式。
+
+所有表达式先做类型检查，再由 SQL Server、DuckDB 或其他方言 Renderer 渲染。
+
+### 2.4 Relation：方向性 Multiplicity + Optionality + Integrity
+
+关系是 Optimizer 进行 JOIN、预聚合和行数推断的唯一依据。目标结构：
+
+```jsonc
+{
+  "id": "relation.order_customer",
+  "name": "订单所属客户",
+  "from": {
+    "entity": "entity.fact_order",
+    "attribute": "attribute.fact_order.customer_id"
+  },
+  "to": {
+    "entity": "entity.dim_customer",
+    "attribute": "attribute.dim_customer.customer_id"
+  },
+  "multiplicity": {
+    "from_to": { "min": 1, "max": 1 },
+    "to_from": { "min": 0, "max": "many" }
+  },
+  "integrity": {
+    "mode": "ENFORCED",
+    "source": "DATABASE_FOREIGN_KEY",
+    "constraint_name": "FK_order_customer",
+    "confidence": 1.0
+  },
+  "temporal": null,
+  "semantics": "每张订单属于一个客户"
+}
+```
+
+方向定义无歧义：
+
+- `from_to`：一行 from 最少/最多匹配多少行 to。
+- `to_from`：一行 to 最少/最多匹配多少行 from。
+- `min=0` 表示该方向可选，`min=1` 表示必选。
+- `min=unknown` 表示用户明确选择“不知道是否必须匹配”，优化器不得假设参与完整性。
+- `max=1 | many | unknown` 表示方向性基数。
+
+常见映射：
+
+| UI 关系类型 | `from_to.max` | `to_from.max` |
+|---|---:|---:|
+| 多对一 N:1 | 1 | many |
+| 一对多 1:N | many | 1 |
+| 一对一 1:1 | 1 | 1 |
+| 多对多 N:M | many | many |
+| 未知 | unknown | unknown |
+
+`integrity.mode`：
+
+- `ENFORCED`：源系统真实约束且可信；
+- `DECLARED`：业务人员明确声明，但源系统不强制；
+- `INFERRED`：系统根据样本/列特征推断；
+- `UNKNOWN`：无法保证，优化器不得做依赖基数的激进改写。
+
+`temporal` 用于缓慢变化维、历史组织关系等：
+
+```jsonc
+{
+  "fact_time": "attribute.fact_order.order_date",
+  "valid_from": "attribute.customer_region.valid_from",
+  "valid_to": "attribute.customer_region.valid_to"
+}
+```
+
+#### Relation 不固定 JOIN 类型
+
+本体描述业务事实，不固定每次查询都使用 INNER 或 LEFT JOIN。实际 JOIN 语义由任务的 domain policy 决定：
+
+- `EXCLUDE_UNMATCHED`：未匹配事实不进入结果；
+- `KEEP_AS_UNKNOWN`：保留并归入“未知”；
+- `ERROR_ON_UNMATCHED`：发现未匹配即报告数据质量问题。
+
+Relation 的可选性帮助 Optimizer 判断风险，但不能机械替代查询语义。
+
+### 2.5 关系录入和导入
+
+用户手工新建/编辑关系时必须完成：
+
+1. 选择 from entity 和属性；
+2. 选择 to entity 和属性；
+3. 选择关系类型 N:1、1:N、1:1、N:M 或未知；
+4. 分别回答“每条 from 是否必须匹配 to”和“每条 to 是否必须被 from 匹配”；答案为必须、可以没有或未知；
+5. 确认完整性来源；
+6. 阅读双向自然语言预览后保存。
+
+SQL 导入可预填：
+
+- FK + 被引用 PK/UNIQUE → from→to 最大 1；
+- FK 列 NOT NULL → from→to 最小 1，否则 0；
+- FK 列自身 UNIQUE → to→from 最大 1，否则 many；
+- 真实 FK 约束 → `ENFORCED`；
+- 复合外键必须作为一个整体关系导入。
+
+CSV、API 或跨源关系通常无法自动证明。系统可以给候选和置信度，但用户必须确认；显式选择“未知”时仍可执行，只禁用不安全的预聚合、JOIN 重排和 fan-out 假设。
+
+### 2.6 本体校验
+
+发布或运行前至少检查：
+
+- entity/attribute/metric/relation id 唯一；
+- relation 端点属性存在且属于对应 entity；
+- relation multiplicity 两个方向均已填写；
+- `ENFORCED` 关系必须有可追溯的约束来源；
+- N:M 建议显式建桥 entity；没有桥实体时标记高风险；
+- metric expression 类型合法，统计函数与 additivity 兼容；
+- 引用的 Resolver 存在、启用且属于本体允许集；
+- relation 图能够连通一个结构化任务所引用的实体。
 
 ---
 
-## 4. 知识层：自动生成本体
+## 3. Resolver 与能力模型
 
-Concept/Binding 不能全靠手工输入，否则本体永远建不起来。做法：让 Resolver **探测源、抽样数据**，自动推断候选本体。
+### 3.1 统一能力接口
 
-### 4.1 四步流程
-
-```
-① 探测 describe()  → 源自报出有哪些表/字段，再抽几行样例
-② 理解            → 看列名/类型/去重数/样例值/外键
-③ 生成候选        → Concept + Binding + 置信度
-④ 确认            → 高置信自动收；低置信标红交人工
-```
-
-### 4.2 销售示例
-
-探测到 `fact_sales(amount, gross_margin, region_id, order_date)`、`dim_region(region_id, region_name)` 及外键，自动推断：
-
-- Concept：`entity.sales`（表 fact_sales）+ `attr.sales.gross_margin`（列）；`entity.region`（表 dim_region）+ `attr.region.name`（列）；由外键推出 `rel.sales_region`（n:1）。
-- Binding：attribute → 列、entity → 表；relation 的键由外键推出（不落 Binding）。
-
-### 4.3 跨源合并
-
-SQL 里的「毛利」和 Agent 懂的「毛利」，系统识别为**同一概念**，自动合并成一个 Concept、绑两个 Binding = 跨源融合。
-
-### 4.4 半自动原则
-
-- 机器生成**候选**，人只**确认 / 改名**剩下的。
-- 交给人的情形：含义歧义、度量可加性判断、敏感数据（敏感数据只抽脱敏统计）。
-- 不同源探测方式不同：
-  - **SQL**：信息最全（`INFORMATION_SCHEMA` + 外键 + 抽样）。
-  - **文件**：靠列名匹配猜关联。
-  - **Data Agent**：黑盒，改成直接问它「你能答哪些概念」，让它**自报能力清单**。
-
-### 4.5 接口
+Resolver 负责具体执行位置的能力声明、编译和执行：
 
 ```python
-class Resolver(ABC):
-    def describe(self) -> SourceSchema: ...   # 结构探测：表/字段/外键
-    def sample(self, obj: str, n: int = 20) -> list[dict]: ...  # 抽样（脱敏）
-```
-
----
-
-## 5. 能力层：Resolver
-
-### 5.1 统一接口（最关键的抹平）
-
-数据源、AI 智能体、执行动作、甚至「人」（human-in-the-loop），都长成**同一个接口**。优化器眼里没有「源」和「Agent」之分，只有一堆**报了能力清单、竞标同一段查询的 Resolver**。
-
-```python
-class Resolver(ABC):
-    id: str                       # e.g. "dwh.sql", "agent.sales", "ticket.http"
-
+class Resolver:
     def capabilities(self) -> Capabilities: ...
-    #   报能力清单：能答哪些概念、成本、时效、信任分、是否支持用户级权限
-
-    def plan(self, node: SQGNode, binding: Binding) -> PlannedCall: ...
-    #   评估 + 把节点编译成「具体调用」（SQL / 检索 / 自然语言 / HTTP）
-
-    def resolve(self, call: PlannedCall, ctx: ExecContext) -> ResolveResult: ...
-    #   干活：真正执行，返回数据 / 答案+证据 / 回执
-
-    # 自动建本体用（见第 4 节）
     def describe(self) -> SourceSchema: ...
-    def sample(self, obj: str, n: int = 20) -> list[dict]: ...
+    def compile(self, fragment) -> PlannedCall: ...
+    def fetch(self, call, context) -> NodeResult: ...
 ```
 
-三方法一句话：**capabilities() 报能力、plan() 评估+编译、resolve() 干活。**
+类型示例：SQL、CSV/DuckDB、Web IQ、Agent、Action、REST、向量检索。
 
-- **数据 Resolver**：`resolve()` = 生成查询取数。
-- **Agent Resolver**：`resolve()` = 用自然语言问它，返回答案 + 证据。
-- **动作 Resolver**：`resolve()` = 执行副作用（派任务），返回回执。
-- **人工介入 Resolver（human-in-the-loop）**：`resolve()` = 向用户发起请求 → **阻塞等待** → 返回用户的输入 / 审批 / 判断。与 Agent Resolver 同构，只是被问的对象是人。
+### 3.2 Source Instance
 
-### 5.2 Resolver 源类清单
+物理同源判断使用 Source Instance，而不是 resolver 类型：
 
-| # | 源类型 | 性质 | 交互方式 | 说明 |
-|---|---|---|---|---|
-| 1 | 关系库 SQL / PG | 被动 · 确定 | 查询语言取数 | 结果确定可复算 |
-| 2 | 向量库 / 知识库 | 被动 · 近似 | RAG 检索 | topk 召回，近似 |
-| 3 | **Fabric IQ** ★ | 主动 · 黑盒 | 自然语言 `ask()` | 数据 / 语义本体智能体（Fabric）|
-| 4 | **Foundry IQ** ★ | 主动 · 黑盒 | `ask()` | 知识接地 · RAG（Azure Foundry）|
-| 5 | **Web IQ** ★ | 主动 · 黑盒 | `ask()` | Web + 自定义应用知识 |
-| 6 | **Work IQ** ★ | 主动 · 黑盒 | `ask()` | M365 工作上下文（邮件/文档/会议）|
-| 7 | REST / SaaS API | 被动 · 外部 | HTTP | 外部系统 |
-| 8 | **动作：写回/审批/触发** ★ | 主动 · 有状态 | 副作用调用 | 分析即行动 |
-| 9 | **人工介入 Human** ★ | 主动 · 阻塞 | 请人操作 → 等待 | 审批 / 补充信息 / 人工判断（human-in-the-loop）|
+```text
+sql_sales_prod 与 sql_masterdata 都是 SQL，但不是同一 Source Instance。
+csv_orders 与 csv_returns 都是 CSV，也可能使用不同凭据和位置。
+```
 
-- **被动**：你用查询语言去取数、结果确定；**主动**：你把需求交给它、它自己去办。
-- **★ 主动源是差异化**：四个 **Microsoft IQ**（Fabric / Foundry / Web / Work IQ，Ignite 2025 发布的企业智能层）、**写回动作**、**人工介入** —— 把智能体、动作、甚至「等人操作/审批」都纳入同一套 Resolver 接口。
+Source Instance 标识至少包含：
 
-### 5.3 能力清单（Capabilities）Schema
+- Resolver 注册名；
+- 凭据/连接目标；
+- 数据库或文件集合；
+- 用户安全域；
+- 快照/一致性语义。
+
+只有这些要素兼容时才允许共享扫描或下推 JOIN。
+
+### 3.3 Capabilities
+
+能力不能只写“支持 AGGREGATE”，还要让 Optimizer 能判断具体下推：
 
 ```jsonc
 {
-  "resolver": "dwh.sql",
-  "concepts": ["metric.gross_margin", "metric.sales_amount", "dim.region"],
-  "operators": ["SELECT", "FILTER", "AGGREGATE"], // 支持的源执行算子（JOIN 是引擎内存算子，不由源声明）
-  "cost": 0.2,           // 相对成本 0~1
-  "latency_ms": 300,     // 典型时延
-  "trust": 0.98,         // 信任分（裁决权重）
-  "user_scoped": true,   // ★ 是否支持用户级权限控制（行级安全/数据权限）
-  "freshness": "realtime"
+  "logical_operators": ["SELECT", "AGGREGATE", "SEARCH", "BROWSE"],
+  "relational": {
+    "filter": ["EQ", "IN", "GT", "BETWEEN", "LIKE"],
+    "join": ["INNER", "LEFT"],
+    "aggregates": ["SUM", "COUNT", "AVG", "MIN", "MAX", "MEDIAN", "PERCENTILE"],
+    "time_grains": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"],
+    "window": true,
+    "top_n": true,
+    "conditional_aggregate": true,
+    "temporary_table": false
+  },
+  "limits": {
+    "max_parameters": 2100,
+    "max_concurrency": 8
+  },
+  "cost": {
+    "typical_latency_ms": 300,
+    "egress_cost": 0.2
+  },
+  "user_scoped": true
 }
 ```
 
-`user_scoped` 是第 8 节权限透传的开关。
-
-### 5.4 竞标 / 路由
-
-同一个 SQG 节点，可能有多个 Resolver 的能力清单覆盖它。优化器按 **信任 / 成本 / 时效** 加权打分，选中一个（或多个做交叉验证）。
-
-```
-score(resolver, node) = w_trust * trust
-                      - w_cost  * cost
-                      - w_lat   * norm(latency)
-                      + w_cover * concept_coverage
-```
+缺失能力不是错误：Optimizer 可以把不支持的部分提升到 Compute Fragment。
 
 ---
 
-## 6. 查询语言：SQG（语义查询图，逻辑）
+## 4. SQG：面向人的高层语义任务 DAG
 
-SQG = **Semantic Query Graph** = 语义查询图。它是 **Compiler 产出的逻辑执行 DAG**：节点是算子（over concept_id）、边是依赖。
+### 4.1 节点粒度
 
-> **铁律：逻辑 SQG 不含 resolver、不含物理表**——只有 concept_id + 算子。选源、下推、join 融合等是 Optimizer 把它优化成**物理 DAG** 时的事（见第 7 节）。
+一个步骤成为 SQG 节点，应同时满足多数条件：
 
-### 6.1 算子（按执行位置分两类）
+- 能用一句业务语言清楚命名；
+- 产生可独立查看、验证或复用的中间结论；
+- 后续步骤会消费该结论；
+- 用户能从 DAG 直接理解“为什么需要这一步”。
 
-| 类别 | 算子 | 作用 |
-|---|---|---|
-| **源执行（下推给 Resolver）** | `SELECT` | 取属性 / 文档 |
-| | `FILTER` | 约束（只看华东） |
-| | `AGGREGATE` | 指标计算（对毛利求和） |
-| | `ASK` ★ | 交给 Agent 回答（归因） |
-| | `ACT` ★ | 执行动作 / 写回（建工单） |
-| **引擎内存执行** | `JOIN` | 对**上游节点的结果**按 relation 的键做 hash join |
+因此：
 
-**关于 JOIN（关键）**：
-- JOIN **不是用户表达的**，是引擎据 `relation` **自动推导**的；旧的 `TRAVERSE`（沿关系跳）说法废弃。
-- **同源**：JOIN 被 Optimizer **融进下推 SQL**，不出现独立内存 JOIN 节点。
-- **跨源**：保留为内存 JOIN 节点（其上的 AGGREGATE 也变内存执行）。
+```text
+合理：华东2024年销售额 → 生成报告 → 发邮件
+过细：扫描订单 → 过滤年份 → JOIN 区域 → SUM → SORT → LIMIT
+过粗：查询所有数据并生成报告
+```
 
-**核心结论**：问答（ASK）、写回（ACT）与取数/计算**同级**，所以「分析」和「行动」用同一套引擎。
+### 4.2 高层算子集
 
-### 6.2 SQGNode Schema（注意：无 resolver）
+| 算子 | 业务含义 |
+|---|---|
+| `SELECT` | 查询、列举或查找结构化业务对象/字段 |
+| `AGGREGATE` | 完成一项统计、分组或排名任务 |
+| `CALCULATE` | 对上游结果进行确定性比较、对齐、算术或选择 |
+| `SEARCH` | 搜索公开 Web 信息 |
+| `BROWSE` | 读取明确 URL/文档 |
+| `ASK` | 根据已有结果生成解释、总结或报告 |
+| `ACT` | 执行邮件、工单、写回等业务动作 |
+
+不是 SQG 算子：
+
+- `FILTER`：属于 SELECT/AGGREGATE 的 `scope`；
+- `JOIN`：由本体 relation 和 Optimizer 推导；
+- `SORT/LIMIT`：属于 `ranking` 或 `selection`；
+- `ALIGN`：属于 CALCULATE 的输入对齐契约；
+- `PROJECT/SHAPE`：属于结果契约或物理 Fragment 内部操作。
+
+### 4.3 节点公共外壳
+
+SQG 是 discriminated union，`operator` 决定 `spec` 的强类型：
 
 ```jsonc
 {
-  "id": "n3",
-  "op": "ASK",                       // SELECT|FILTER|AGGREGATE|JOIN|ASK|ACT
-  "concept": "metric.total_sales",   // 该节点关心的 concept_id（ASK/ACT 可空）
-  "filter": { "attr.region.name": "华东", "period": "2024Q1" }, // filter 也用 concept_id
-  "groupBy": "attr.time.month",
-  "query": "华东 毛利 下滑",          // SELECT 检索词
-  "prompt": "毛利={n1} 趋势={n2}，解释下滑原因", // ASK 问法，{n} 是占位符
-  "action": "create_ticket",         // ACT 动作
-  "desc": "复盘：{n3}",              // ACT 动作描述（可回填 {n}）
-  "deps": ["n1", "n2"]               // 依赖节点
+  "id": "east_sales",
+  "operator": "AGGREGATE",
+  "name": "华东2024年销售额",
+  "depends_on": [],
+  "inputs": {},
+  "spec": {}
 }
 ```
 
-> 看到了吗——**没有 `resolver` 字段**，也没有物理表名；`concept`/`filter`/`groupBy` 全是 concept_id。
+规则：
 
-### 6.3 SQG（整图）Schema
+- `id` 在一次 SQG 内唯一且稳定；
+- `name` 是用户可读的任务名称；
+- `depends_on` 表达控制依赖：当前节点必须等待哪些上游节点完成；有依赖不代表一定消费其输出；
+- `inputs` 表达数据依赖：输入名映射到上游 `{node, output?, row?}`；不填 `output/row` 时接收完整结果；
+- 每个 `inputs.*.node` 必须同时出现在 `depends_on`，但 `depends_on` 可以包含不传数据的控制依赖，即 `input nodes ⊆ depends_on`；
+- 上游 output 保留原始类型，可以是表、行、列、标量、文档或文本；
+- 所有没有下游消费者的终点节点都属于最终答案；即使 Compiler 漏写，SQG 校验也会自动补入 `outputs`，避免独立子问题已执行却不展示；
+- `outputs` 还必须显式保留用户要求在页面查看的非终点节点。混合“查询 A、查询 B、把 C 发邮件”应输出 A、B 和动作回执；只有 C 进入邮件报告链路；
+- SQG 不包含 `resolver`、表名、列名、SQL、wave 或物理节点 id。
 
-统一信封：**`nodes` + `context`**——逻辑 SQG 与优化后物理 DAG **同结构**，只是节点字段不同（见 §7.2）。
+### 4.4 Typed Predicate 与 Scope
+
+所有范围条件使用表达式 AST：
 
 ```jsonc
 {
-  "nodes": [ /* SQGNode[] */ ],
-  "context": {                       // 跨引擎「交接包」：编译器 → 优化器
-    "intent": "explain_and_act",
-    "as_user": "zhangsan@beone",     // 当前用户（权限透传，见第 8 节）
-    "entities": { "region": "华东", "period": "2024Q1", "metric": "gross_margin" },
-    "hints": { "attribution_needs_llm": true }  // 编译器给优化器的提示
-  }
+  "kind": "and",
+  "operands": [
+    {
+      "kind": "time_range",
+      "attribute": "attribute.fact_order.order_date",
+      "start": "2024-01-01",
+      "end_exclusive": "2025-01-01",
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "kind": "comparison",
+      "left": { "kind": "attribute", "concept": "attribute.dim_region.area" },
+      "operator": "EQ",
+      "right": { "kind": "literal", "value": "华东", "data_type": "text" }
+    }
+  ]
 }
 ```
+  "id": "ratio",
+  "operator": "CALCULATE",
+  "name": "计算中位数与平均数之比",
+  "depends_on": ["monthly_median", "monthly_average"],
 
-> **context 是引擎间的「交接包」**：上一段引擎把下一段要用的额外信息/状态值放进去（意图、消歧实体、提示，优化后还会带 `wave`/并行度等）。
-> 占位符规则：任何 `deps` 非空的节点，其 `prompt`/`desc` 里用 `{nX}` 引用上游结果，**运行时回填**。
+支持 `and/or/not`、比较、`in`、`between`、空值、字符串匹配和显式时间区间。日期月/季/年必须编译成半开区间；不能依赖方言隐式转换。
 
----
-
-## 7. 运行引擎
-
-一次提问：**逻辑 → 物理 → 执行** 三段（+ 生成器）：
-
+### 4.5 SELECT Spec
+  "spec": {
+    "alignment": {
+      "keys": ["order_month"],
+      "domain": "INNER",
+      "scalar_broadcast": true
 ```
-提问 → ①Compiler   → 逻辑 SQG DAG（语义、无 resolver/物理）
-     → ②Optimizer → 优化后的物理执行 DAG（= 查询优化器）
-     → ③Coordinator→ 执行结果（分波并行 + 内存 JOIN + 回填 + 合并 + 裁决）
-     → ④Generator  → 答案 + 血缘
-```
-
-### 7.1 编译器 Compiler（NL → 逻辑 SQG）
-
-**输入**：自然语言 + 历史。**输出**：**逻辑 SQG**（DAG，over concept_id）。
-
-职责：
-1. 意图识别（`intent`）。
-2. 概念消歧：把「总销售额」「华东」「上季度」映射到 concept_id。
-3. 据 metric 表达式 / relation / filter 拆算子建 DAG，标注 `deps`；join 是**逻辑节点**（还没决定怎么执行）。
-4. 注入 `as_user`。
-
-**产出物只含 concept_id + 算子，不含 resolver、不含物理表。** 实现建议：LLM 受约束生成（给定 Concept 清单 + 算子 schema，输出 JSON）+ schema 校验。
-
-### 7.2 优化器 Optimizer（逻辑 SQG → 物理 DAG）
-
-Optimizer 不是简单「选个源」，而是把**逻辑计划优化成物理计划**——**resolver 到这里才第一次出现**。它做：
-
-1. **选源竞标**：查每个节点 concept 的 Binding → 让候选 Resolver 按信任/成本/时效打分选中（见 5.4）。
-2. **下推 vs 内存决策**：把**同源子树**（含 join）**融成一条下推 SQL**；**跨源**则保留为**内存 JOIN** 节点，并按需做 **semi-join 下推**（先取一侧的键，过滤另一侧，少搬数据）。
-3. **编译成真实调用**：调 `resolver.plan(node, binding)` 生成 `call`（SQL / 检索 / 自然语言 / HTTP）；依赖别人的节点 `call` 里留 `{nX}` 占位符。
-4. **权限透传**：若中标 Resolver `capabilities.user_scoped == true`，给该 plan 项打 `user_scoped: true`（见第 8 节）。
-
-一句话：**Optimizer = 选源 + 下推/内存优化 + 编译成调用 + 权限透传。** 产出的物理 DAG（plan）是**第一个带 resolver 的东西**：
-
-**物理执行计划 plan Schema**（与 SQG 同信封：`nodes` + `context`；节点带 `resolver`/`call`/`wave`）
-
-```jsonc
-{
-  "nodes": [
-    { "id": "n1", "op": "AGGREGATE", "name": "华东上季度毛利",
-      "resolver": "dwh.sql", "wave": 1, "deps": [],
-      "call": "SELECT SUM(gross_margin) ... WHERE region='华东' AND period='2024Q1'",
-      "trust": 0.98, "user_scoped": true },
-    { "id": "n2", "op": "AGGREGATE", "name": "毛利月度趋势",
-      "resolver": "dwh.sql", "wave": 1, "deps": [],
-      "call": "SELECT month, SUM(gross_margin) ... GROUP BY month",
-      "user_scoped": true },
-    { "id": "n4", "op": "SELECT", "name": "政策/涨价佐证",
-      "resolver": "kb.vector", "wave": 1, "deps": [],
-      "call": { "q": "华东 毛利 下滑 政策 原材料", "topk": 3 } },
-    { "id": "n3", "op": "ASK", "name": "毛利下滑归因",
-      "resolver": "agent.sales", "wave": 2, "deps": ["n1","n2","n4"],
-      "call": { "ask": "毛利={n1} 趋势={n2} 佐证={n4}，请解释下滑原因并给证据" },
-      "user_scoped": true },
-    { "id": "n5", "op": "ACT", "name": "建复盘工单",
-      "resolver": "ticket.http", "wave": 3, "deps": ["n3"],
-      "call": { "POST": "/tickets", "body": { "assignee": "张三", "desc": "{n3}" } },
-      "user_scoped": true }
+    "outputs": [
+      {
+        "name": "median_avg_ratio",
+        "expression": {
+          "kind": "binary",
+          "operator": "SAFE_DIVIDE",
+          "left": { "kind": "node_output", "input": "median", "field": "median_amount" },
+          "right": { "kind": "node_output", "input": "average", "field": "average_amount" },
+          "zero_division": "NULL"
+        }
+      }
+    ],
+    "selection": {
+      "kind": "MIN_BY",
+      "field": "median_avg_ratio",
+      "take": 1,
+      "nulls": "LAST"
+    },
+    "result": {
+      "kind": "TABLE",
+      "name": "中位数与平均值比最低的月份",
+      "grain": ["order_month"]
+    }
+  "dimensions": [
+    {
+      "kind": "attribute",
+      "concept": "attribute.dim_region.area",
+      "output": "region"
+    }
   ],
-  "context": {                       // 交接包：优化器 → 协调器
-    "as_user": "zhangsan@beone",
-    "max_wave": 3,                   // 共 3 波
-    "parallelism": 4,                // 波内并行度
-    "placeholder": "brace"           // 回填占位符风格 {nX}
+  "measure": {
+    "metric": "metric.sales_amount",
+    "output": "sales_amount"
+  },
+  "ranking": {
+    "by": "sales_amount",
+    "direction": "DESC",
+    "take": 3,
+    "ties": "EXCLUDE",
+    "tie_breakers": [
+      { "field": "region", "direction": "ASC" }
+    ]
+  },
+  "domain_policy": { "unmatched": "ERROR_ON_UNMATCHED" },
+  "result": {
+    "kind": "RANKING",
+    "name": "销售额排名前三的区域",
+    "grain": ["region"]
   }
 }
 ```
 
-> 每个物理节点**自带 `op`/`name`/`deps`/`wave`** → 这份 JSON 一落库就够前端**独立画出整张 flow**（不用回查 SQG）。`wave` 由优化器算好写死；`context.max_wave`/`parallelism` 是执行级提示。
-
-一句话：**优化器 = 选源 + 把每个节点编译成真实调用 + 算好分波 + 标注谁需要用户身份。**
-
-> as-built：SQL 类节点的「编译成 call」已下沉——优化器只产出**方言中立的 `QuerySpec`**，`resolver.compile(spec)` 才渲染出 `{sql,params}`，优化器内不再拼 SQL 字符串（见 §37）。
-
-### 7.3 协调器 Coordinator（分波并行 + 回填 + 合并 + 裁决）
-
-真正跑完这张 DAG。按依赖**分波**，能并行的并行：
-
-```
-第 1 波（n1/n2/n4 无依赖 → 同时发出）
-  n1 数仓 → 毛利 = 1200万（环比 -15%）
-  n2 数仓 → 4月480 → 5月420 → 6月300
-  n4 知识库 → 命中《价格政策》《涨价通报》
-        ↓
-第 2 波（n3，依赖 n1/n2）
-  把 n1/n2 结果回填进 prompt → 调销售 Agent
-  → 主因 = 大客户Q1减采30% + 原材料涨价（附引用证据）
-        ↓
-第 3 波（n5，依赖 n3）
-  把 n3 说明回填进任务内容 → 调工单系统
-  → 工单 #4521 已创建，派给张三（回执）
-        ↓
-合并 + 裁决
-  合并：n1/n2/n3/n4 按主题（华东·毛利·上季度）拼成一份，n5 回执附上
-  裁决：若某源毛利与 n1（数仓·信任0.98）冲突 → 以数仓为准，
-        败者数字丢弃、文字保留；裁决记入血缘
-```
-
-**执行算法（伪代码）**
-
-```python
-def coordinate(plan, ctx):
-    results = {}
-    for wave in topo_waves(plan):          # 拓扑分波
-        calls = [backfill(item, results) for item in wave]  # 用已完成结果回填占位符
-        wave_results = parallel_map(lambda c: run_call(c, ctx), calls)  # 并行执行
-        results.update(wave_results)
-    merged = merge_by_concept(results)      # 按概念主键对齐合并
-    verdict = arbitrate(merged)             # 冲突裁决（信任×时效×精度）
-    return merged, verdict
-
-def run_call(item, ctx):
-    if item.user_scoped:
-        ctx = ctx.with_user(item.as_user)   # ★ 透传当前用户
-    return resolver_of(item).resolve(item.call, ctx)
-```
-
-**裁决规则**：数字类冲突按 `信任 × 时效 × 精度` 加权，取胜者数字；败者数字丢弃、文字（解释/证据）保留；整个裁决过程写入血缘。
-
-**结果 result Schema**
+没有预定义 metric 时可以使用 ad-hoc statistic：
 
 ```jsonc
 {
-  "n1": { "毛利": 12000000, "环比": -0.15, "source": "数仓", "trust": 0.98 },
-  "n2": { "series": [480, 420, 300], "unit": "万" },
-  "n4": { "docs": ["价格政策", "涨价通报"] },
-  "n3": { "answer": "主因:大客户减采30%+原材料涨价",
-          "evidence": ["n4#1"], "trust": 0.82 },
-  "n5": { "ticket": "#4521", "assignee": "张三", "status": "created" },
-  "verdict": { "毛利": "以 n1 为准(trust 0.98)", "loser": "某源 1180万 → 丢弃数字" }
+  "value": { "kind": "attribute", "concept": "attribute.fact_order.amount" },
+  "statistic": {
+    "function": "PERCENTILE",
+    "percentile": 0.5,
+    "method": "CONTINUOUS",
+    "accuracy": "EXACT",
+    "nulls": "IGNORE"
+  },
+  "output": "median_amount"
 }
 ```
 
-一句话：**协调器 = 按 DAG 分波并行 + 上游结果运行时回填 + 结果合并 + 数字冲突按信任分裁决。**
+通用统计函数至少支持：
 
-### 7.4 生成器 Generator（答案 + 血缘）
+- `SUM`、`COUNT`、`COUNT_DISTINCT`、`AVG`、`MIN`、`MAX`；
+- `MEDIAN`、`PERCENTILE`；
+- `VARIANCE`、`STDDEV`；
+- 可扩展的近似统计，但必须显式标注 `accuracy=APPROXIMATE`。
 
-**输入**：合并结果 + verdict。**输出**：最终答案（可流式）+ 血缘。
+时间维度使用显式 grain：
+
+```jsonc
+{
+  "kind": "time",
+  "attribute": "attribute.fact_order.order_date",
+  "grain": "MONTH",
+  "calendar": "GREGORIAN",
+  "timezone": "Asia/Shanghai",
+  "output": "order_month"
+}
+```
+
+`result_filter`、`ranking` 是该业务统计任务的完整语义，不代表必须渲染成 SQL HAVING/TOP。
+
+### 4.7 CALCULATE Spec
+
+CALCULATE 用于“人能理解为一个独立思考步骤”的确定性计算。内部允许对齐、公式、排序和选择，但 UI 仍显示一个节点。
+
+```jsonc
+{
+  "inputs": {
+    "median": { "node": "monthly_median" },
+    "average": { "node": "monthly_average" }
+  },
+  "alignment": {
+    "keys": ["order_month"],
+    "domain": "INNER",
+    "scalar_broadcast": true
+  },
+  "outputs": [
+    {
+      "name": "median_avg_ratio",
+      "expression": {
+        "kind": "binary",
+        "operator": "SAFE_DIVIDE",
+        "left": { "kind": "node_output", "input": "median", "field": "median_amount" },
+        "right": { "kind": "node_output", "input": "average", "field": "average_amount" },
+        "zero_division": "NULL"
+      }
+    }
+  ],
+  "selection": {
+    "kind": "MIN_BY",
+    "field": "median_avg_ratio",
+    "take": 1,
+    "nulls": "LAST"
+  },
+  "result": {
+    "kind": "TABLE",
+    "name": "中位数与平均值比最低的月份",
+    "grain": ["order_month"]
+  }
+}
+```
+
+如果两个输入 grain 不可对齐且未声明广播规则，编译失败，不能让 ASK 猜测对应关系。
+
+### 4.8 SEARCH、BROWSE、ASK、ACT
+
+这四个算子保持简单：
+
+```jsonc
+{ "operator": "SEARCH", "spec": { "query": "...", "max_results": 10 } }
+{ "operator": "BROWSE", "spec": { "url": "https://...", "max_length": 30000 } }
+{ "operator": "ASK", "spec": { "instruction": "根据输入生成销售报告", "format": "MARKDOWN" } }
+{ "operator": "ACT", "spec": { "action": "EMAIL.SEND", "recipient": "颜斌" } }
+```
+
+依赖上游结果的 SEARCH 必须用节点级 `inputs` 接收 output，不能把“销量最高的产品”等抽象指代直接发给搜索服务：
+
+```jsonc
+{
+  "operator": "SEARCH",
+  "depends_on": ["top_product"],
+  "inputs": {
+    "product_name": { "node": "top_product", "output": "product", "row": 0 }
+  },
+  "spec": {
+    "query": "{product_name} 最新新闻",
+    "max_results": 10
+  }
+}
+```
+
+Compiler 校验 input node 属于 `depends_on`、选择的 output 存在于上游 Result Contract，以及文本中的 `{input_name}` 已声明。Coordinator 保留输入原始类型；仅当目标参数是格式字符串时才转成文本。单纯的 `depends_on` 只控制顺序，不会自动传递数据。
+
+约束：
+
+- ASK 只能解释和组织输入，不得重新计算数值、排名或比率；
+- ACT 的收件人解析、重名校验、幂等和具体 API 调用属于 Action Resolver 内部契约；
+- EMAIL.SEND 必须从 ASK 选择单个文本标量：`{"node":"report","output":"value","row":0}`；完整表不能直接填入 `{report}` 文本参数；
+- 若 ACT 无法唯一解析对象，应失败并返回明确业务错误，不应由 SQG 拆出多个技术节点。
+
+### 4.9 Result Contract
+
+每个结构化节点必须有可验证的结果契约：
+
+- `kind`: `SCALAR | TABLE | RANKING | DOCUMENT | TEXT | ACTION`；
+- `fields`: 业务字段名、类型、单位和可空性；
+- `grain`: 一行由哪些语义键唯一确定；
+- `domain`: 覆盖范围和未匹配策略；
+- `ordering`: 若结果有业务顺序，说明排序键；
+- `lineage`: 字段来自哪些 concept/逻辑节点。
+
+Compiler 给出业务别名和预期形态，类型检查器根据本体和表达式推导其余字段并验证。
+
+---
+
+## 5. Initializer 与 Compiler
+
+### 5.1 Initializer
 
 职责：
-1. 用合并数据写出自然语言答案（可套用 `dbo.prompt_templates` 模板）。
-2. 附血缘：每个数字/结论来自哪个节点、哪个 Resolver、信任分、裁决记录。
-3. 附动作回执（如 n5 工单）。
 
-### 7.5 评估回路 Harness（外层自我纠错，可选但推荐）
+1. 根据问题和用户显式选择确定一个或多个候选本体；
+2. 合并 namespaced concept catalog；
+3. 准备可用 Resolver/operator/statistic 能力；
+4. 准备指标、关系、属性描述及必要的 RAG 上下文；
+5. 将本体选择与上下文交给 Compiler。
 
-四段引擎跑完**不直接交付**：外面再套一层 **Harness**，对整轮执行打分——不合理就带着问题重跑一轮。这是 evaluator / critic 型的**外层 loop**。
+路由缓存：相同规范化问题 + 相同候选本体集合使用一小时滑动过期；命中后续期。缓存只保存路由决定，不缓存用户数据。
 
-**评估三件事**（Harness 检查一轮 DAG 执行是否合理）：
-1. **是否报错 / 超时**：任一节点 `resolve()` 失败、超时、返回错误码。
-2. **各节点输出是否合理**：空结果、越界值、自相矛盾、证据缺失、schema 不符。
-3. **最终答案 / 动作是否靠谱**：答非所问、与问题不相关、动作有风险、缺少必要证据。
+### 5.2 Compiler
 
-**分支**：
-- **合理 → 交付**（答案 + 动作 + 血缘）。
-- **不合理 → 重来一轮**：把「不合理点」+ **用户原问题** 拼成**新提示词**，回到 Compiler 重新编译执行（第 k → k+1 轮）。新提示词示例：`「上一轮 n6 归因缺证据、华南数字异常，请重查并补证据」+ 原问题`。
+Compiler 的职责是形成业务任务图，而不是决定查询融合：
 
-**收敛保护**：
-- 外层循环有**最大轮数上限 N**（例：3 轮），防止空转 / 死循环。
-- 到顶仍不合理 → 交付「尽力的结果 + 说明局限」，或**转人工介入 Resolver**（§5.2 第 9 行，human-in-the-loop）兜底。
+1. 拆解用户子意图；
+2. 映射 concept id；
+3. 按业务任务粒度创建节点；
+4. 生成各节点 typed spec；
+5. 建立业务依赖；
+6. 运行结构与语义校验；
+7. 失败时把结构化错误反馈给 LLM 重新编译。
 
+编译器明确禁止：
+
+- 为节省查询把“华东销售额”和“华南销售额”合成一个 SQG 节点；
+- 生成物理表、列、SQL、JOIN；
+- 把确定性计算写进 ASK prompt；
+- 用未声明关系连接同名字段。
+
+### 5.3 编译期校验
+
+至少包括：
+
+- DAG 无环、依赖存在；
+- operator 与 spec discriminated union 匹配；
+- concept 存在且类型正确；
+- scope predicate 类型可比较；
+- group dimension 与 statistic 合法；
+- additivity、时间 grain、精确性要求合法；
+- 一个结构化任务引用的实体在 relation 图中连通；
+- CALCULATE 输入 grain 可对齐；
+- TopN/极值选择具有确定性 tie-breaker；
+- ASK/ACT 能力在本体允许集中可用。
+
+Compiler 缓存只缓存校验成功、非空的 SQG；键至少包含规范化问题、本体 id 集合、本体内容指纹和可用算子/统计能力，一小时滑动过期。本体内容变化必须使缓存失效。
+
+---
+
+## 6. Optimizer：SQG 到 PEP
+
+### 6.1 三步 Lowering
+
+Optimizer 内部按三步工作：
+
+```text
+Typed SQG
+  → Semantic Binding：concept → entity/attribute/metric/relation/source
+  → Bound Logical Plan：Scan/Filter/Relate/Derive/Aggregate/Window/TopN
+  → Physical PEP：Source Fragment + Exchange + Compute Fragment + ASK/ACT
 ```
-用户问题(第k轮) → [Compiler→Optimizer→Coordinator→Generator] → 结果
-       ↑                                                          │
-       │                                                     Harness 评估
-       │                                                          │
-       └── 不合理：不合理点 + 原问题 → 新提示词(第k+1轮) ←──── 合理? ──否
-                                                                  │是 → 交付
-                                （整体 ≤ N 轮）
-```
 
-一句话：**Harness = 跑完再自检，不对就带着问题重想一遍，最多 N 轮，像人复核一样。**
+三个箭头后的产物都必须保存，不能只保存最终 PEP：
 
-### 7.6 前端可视化的数据来源：结构 vs 状态（关键）
-
-flow 图 = **两份数据叠加**，来源分离、职责清晰：
-
-| 图上的东西 | 来源 | 时机 |
+| 步骤 | 持久化产物 | 回答的问题 |
 |---|---|---|
-| **结构**：节点、连线、分波布局、标签/算子/源 | 优化器产出的 **plan JSON**（`nodes`+`context`，落 `nexus.run_stage`）| 优化后**写一次**，前端拉一次即可画出整张图 |
-| **状态**：跑到哪、颜色（灰=pending / 蓝=running / 绿=done / 红=failed）、耗时、值、报错 | **`nexus.run_node`** 逐行（协调器执行时增量写）| 前端**轮询**，按 `node_id` 覆盖到图上 |
+| Semantic Binding | `semantic_binding` | 每个 concept 解析成了什么 entity/attribute/metric，选择了哪些 relation path 和 Source candidates？ |
+| Bound Logical Plan | `bound_logical_plan` | 在不考虑执行位置和方言时，逻辑上究竟要做哪些 Scan/Filter/Join/Aggregate/TopN？ |
+| Physical Planning | `physical_execution_plan` | 最终在哪里执行、如何融合/下推、如何 Exchange，哪些物理输出实现哪些 SQG 结果？ |
 
-- 连线颜色由**下游节点状态**推导（灰/蓝/绿/红）。
-- 因此 `run_node` **只存状态/结果**（不重复存结构）：node 的 `deps`/`op`/`name`/`wave` 都在 plan JSON 里；运行时只往 `run_node` 覆盖 `state`/实际 `call`/`value`/耗时/错误。
-- 协调器**必须能解释这张 DAG**：读 `nodes[].deps` 拓扑分波（或直接用节点上的 `wave`），按波并行、回填 `{nX}`、逐节点写 `run_node` 状态。
+#### IR 是什么
 
----
+IR = **Intermediate Representation（中间表示）**。它是 Compiler/Optimizer 在“用户友好的 SQG”和“可执行 PEP/SQL”之间使用的一种**结构化、强类型、可序列化的数据模型**，不是某段 SQL，也不是临时 Python 对象。
 
-## 8. 权限与治理
+`Bound Logical Plan` 可逐词理解：
 
-### 8.1 用户级权限透传（本平台重点）
+- **Bound**：SQG 中的 concept 已绑定到规范化 metric expression、entity、attribute、relation path 和候选 Source Instance；不再是模糊业务词。
+- **Logical**：只表达“必须做什么运算”，还没有决定“在哪个引擎、用哪种 JOIN 算法、是否广播、生成什么方言 SQL”。
+- **Plan**：运算以有依赖的树/DAG 表达。
+- **IR**：供类型检查、grain/domain/cardinality 推导、规则改写、成本估算和物理切分共同使用的中间语言。
 
-有些 Resolver 自己带**用户级权限控制**（行级安全 / 数据权限）。设计原则：**权限在数据源头强制，不在应用层手工拼 where。**
+例如 SQG 上只有“销售额排名前三的区域”，Bound Logical Plan 可以是：
 
-流程：
-
-1. Resolver 在 `capabilities()` 里声明 `user_scoped: true`。
-2. 编译器在 SQG 顶部注入 `as_user`（当前登录用户）。
-3. 优化器给中标的 user_scoped 节点打 `user_scoped: true`。
-4. 协调器执行该节点时，把 `as_user` 通过 `ExecContext` 传给 Resolver。
-5. Resolver 按用户身份自行过滤：
-   - `dwh.sql`：行级安全（RLS）按用户过滤。
-   - `agent.sales`：以该用户权限运行。
-   - `ticket.http`：以其身份建单。
-   - `kb.vector`（公共文档）：**不带** user_scoped，无需用户身份。
-
-```python
-@dataclass
-class ExecContext:
-    user: str | None          # 当前用户（user_scoped 时非空）
-    trace_id: str
-    cancellation_token: Any
-
-    def with_user(self, user: str) -> "ExecContext": ...
+```text
+TOP_N 3 BY sales_amount DESC
+  └─ AGGREGATE SUM(amount) BY region
+       └─ RELATE relation.order_customer, relation.customer_region
+            ├─ FILTER/SCAN entity.fact_order
+            ├─ SCAN entity.dim_customer
+            └─ SCAN entity.dim_region
 ```
 
-好处：既安全（源头强制，不会漏），又省心（应用层不用为每个源手写权限 SQL）。
+它比 SQG 细，适合优化器推理；又没有 SQL 方言、Fragment 和 Exchange，仍不是 PEP。
 
-### 8.2 治理内生
+#### Optimizer Artifact 契约
 
-权限（`policy`）和血缘（`provenance`）随每个 Concept 一起挂在本体上（见 3.1），横跨所有层，不是单独一层。可追溯是默认能力。
+三个产物使用稳定 id 串联，并带统一外壳：
 
----
-
-## 9. 分层架构
-
-五层，每层只做一件事，只依赖下一层接口；治理作为竖切面贯穿全层。
-
-| 层 | 名称 | 职责 | 对应组件 |
-|---|---|---|---|
-| L5 | 体验层 | 对话 · 画布 · 渲染 | 前端 Copilot UI / Renderer |
-| L4 | 意图层 | 把请求翻成查询指令 | **Compiler** |
-| L3 | 认知层（核心） | 调度 · 协调 · 生成 | **Optimizer / Coordinator / Generator** |
-| L2 | 语义层 | 本体 + 各源能力清单 | **Concept / Binding / Capabilities** |
-| L1 | 接入层 | 数据 / Agent / 动作 | **Resolver** |
-| 竖切面 | 治理内生 | 权限 / 血缘 / 成本 | `policy` / `provenance` |
-
-研发重心：**L3 认知层**。
-
----
-
-## 10. 端到端示例
-
-**问题**：「华东上季度毛利为什么下滑、跟华南比差在哪，给份说明，并把复盘任务派给区域负责人。」
-
-| 阶段 | 产物 |
-|---|---|
-| ① Compiler | 逻辑 SQG（7 节点）：**n1 FILTER**(期间=上季度) / n2 华东毛利 / n3 华南毛利 / n4 趋势 / n5 佐证 / **n6 归因 ASK**(依赖 n2·n3·n4·n5) / **n7 派单 ACT**(依赖 n6) |
-| ② Optimizer | plan：**n1·n2·n3·n4 同源 → 融成一条 dwh.sql 一次下推**（FILTER 期间折进 WHERE）、n5→kb.vector、n6→agent.sales、n7→ticket.http；依赖别人的留 {n} 占位符；标注 user_scoped |
-| ③ Coordinator | 分波并行（1 条 SQL + n5 检索 → n6 回填调 Agent → n7 回填派单）+ 合并 + 裁决 |
-| ④ Generator | 华东↓ vs 华南↑ 对比结论 + 趋势 + 归因 + 血缘 + 派任回执 |
-| ⑤ Harness | 自检这轮是否合理；不合理 → 带着问题重来（≤ N 轮，见 §7.5） |
-
-中标 Resolver（带信任分）：数仓 0.98、销售 Agent 0.82、知识库 0.75、动作（回执）。
-
-**重点**：全程没有任何「针对某个源」的特殊分支，全是「算子 + Resolver 竞标 + 合并」。
-
-（三段真实 JSON 见[第 15 节附录](#15-附录完整-json-样例)。）
-
----
-
-## 11. 落地路径 P0–P4
-
-分五步建，从简单到完整。先做最小的能用版本，再一步步加东西；每做完一步，都能单独演示一个用户用得上的功能。
-
-| 阶段 | 一句话目标 | 这一步做什么 | 做完能演示 |
-|---|---|---|---|
-| **P0** | 先跑通一条路 | 本体 + Resolver 接口 + SQG 编译器，接一个 SQL 库 | 用一句话问一个数据库，拿到答案 + 血缘 |
-| **P1** | 多个库一起答 | 再接一个向量 / 知识库，加合并与裁决 | 一个问题同时查多个库，答案对不上时自动裁决 |
-| **P2** ★ | AI 也能当一个源 | 加 ASK 算子，接一个 Fabric IQ（Microsoft IQ） | 碰到「为什么」直接问分析 AI，它的回答照样接进来 |
-| **P3** | 查完能直接动手 | 加 ACT 算子 + 动作 Resolver | 不只给答案，还能建工单、发通知、写回系统 |
-| **P4** | 接新库少配置 | Resolver 探测新源，自动补本体映射 | 接新库时自动读表结构、补业务名词对应，少配置 |
-
-原则：
-
-- 每做完一步，都要能单独演示一个用得上的功能。
-- **P0 就把三大接口（Concept / Resolver / SQG）定死**，之后只加实现、不改范式。
-
-风险点：本体自动生成准确率、Agent 返回证据的结构化、跨源主键对齐。
-
----
-
-## 12. 复用现有代码资产
-
-本平台是当前 PowerBI Copilot 语义引擎的**超集**，大量资产可直接迁移：
-
-| 现有资产（`backend/app/services/semantic_engine/`） | 迁移为 |
-|---|---|
-| `Orchestrator`（`orchestrator.py`） | **Optimizer 优化器** 的雏形（状态机 → DAG 调度） |
-| `ToolProvider`（`provider.py`） | **Resolver** 接口（`get_tools`→`capabilities`，`execute`→`resolve`） |
-| `ToolManifest` | **Capabilities** 能力清单 |
-| `FrontChannelConnection`（`front_channel.py`） | 前端交互 / 流式输出（Generator 用） |
-| Renderer 注册表（`src/components/copilot/renderers/`） | L5 体验层渲染 |
-| `credential.py`（凭据系统） | Resolver 连接凭据 |
-| `dbo.api_definitions` / `api_permissions` | 治理内生的权限底座 |
-| `dbo.prompt_templates`（Jinja2） | Generator 答案模板 |
-| `dbo.copilot_runs` / `copilot_run_steps` | 血缘 / 执行审计 |
-
-映射要点：
-- `ToolProvider.execute(tool_name, hints, history, session)` → `Resolver.resolve(call, ctx)`。
-- `Orchestrator.next_action()`（线性状态机） → `Optimizer` 产出 plan + `Coordinator` 拓扑分波（升级为 DAG）。
-
----
-
-## 13. 价值
-
-### 13.1 五个价值
-
-1. **加源零范式**：接新系统 = 写一个 Resolver，引擎不改。
-2. **一种查询**：查数据 / 血缘 / 权限 / 问 Agent 全是同一种查询。
-3. **分析即行动**：ASK 与 ACT 同级，洞察到执行同一引擎打通。
-4. **治理内生**：权限和血缘随概念一起管，可追溯是默认。
-5. **Agent 无缝**：多个智能体协同是 Resolver 竞标机制的自然结果。
-
-判据：加任何新东西，本质只是「本体里加一个 Concept，或加一个 Resolver」，范式不变。
-
----
-
-## 14. 待深挖问题
-
-1. **本体存储选型**：属性图 vs RDF vs 关系库模拟；P0 用 SQL 模拟起步。
-2. **SQG 算子代数 + 编译器**：把六个算子定义完整，设计 NL→SQG 的受约束生成。
-3. **Resolver 竞标 / 路由算法**：「成本-信任-时效」加权模型，冲突裁决细则。
-4. **自动建本体准确率**：结构探测 + 抽样 + LLM 推断的候选质量，减少人工确认。
-
----
-
-## 15. 附录：完整 JSON 样例
-
-以示例问题「华东上季度毛利为什么下滑、跟华南比差在哪，给说明并派复盘任务」为例，三段一一对应。
-
-### ① 查询指令 SQG（编译器输出，`{n}` 是占位符）
-
-```json
+```jsonc
 {
-  "intent": "explain_and_act",
-  "as_user": "zhangsan@beone",
+  "artifact_id": "opt_01_bound_logical_plan",
+  "run_id": "...",
+  "stage": "optimizer",
+  "artifact_type": "bound_logical_plan",
+  "schema_version": 3,
+  "producer_version": "optimizer-3",
+  "state": "complete",
+  "input_artifact_id": "opt_00_semantic_binding",
+  "input_hash": "...",
+  "content": {},
+  "diagnostics": [],
+  "created_at": "2026-07-22T00:00:00Z"
+}
+```
+
+要求：
+
+1. `artifact_type ∈ semantic_binding | bound_logical_plan | physical_execution_plan | optimization_trace`。
+2. `state ∈ complete | partial | failed`；即使某步失败，也保存已形成的 partial content 和 diagnostics，便于排错。
+3. 节点使用稳定 id，并保存 `origin_sqg_nodes`、`input_artifact_id` 和前后映射，使 UI 可以跨三层高亮。
+4. artifact 必须是方言中立 JSON；Compiled SQL/API call 仍记录在 PEP 节点运行详情中。
+5. 缓存命中时仍为本次 run 保存一份 artifact 引用/快照，并标记 `cache_hit`、原 artifact 和版本，保证历史可复现。
+6. 凭据、token 和敏感 literal 必须脱敏；artifact 浏览遵循 run 的访问控制。
+
+除三份阶段结果外，Optimizer 还应保存 `optimization_trace`：
+
+- 应用了哪些规则；
+- 哪些规则因 grain/domain/cardinality/权限/能力不满足而被拒绝；
+- 生成了哪些物理候选；
+- 每个候选的 rows/bytes/cost；
+- 最终选择某个 PEP 的原因。
+
+三份结果用于看“每一步变成了什么”，trace 用于解释“为什么这样变”。
+
+### 6.2 PEP 节点类型
+
+| kind | 含义 |
+|---|---|
+| `SOURCE_FRAGMENT` | 在一个 Source Instance 内可一次编译执行的最大子计划 |
+| `EXCHANGE` | 跨执行位置传输、物化、广播或参数化键传递 |
+| `COMPUTE_FRAGMENT` | 在 DuckDB/计算引擎执行 JOIN、聚合、窗口或派生计算 |
+| `ASK` | 一次 Agent/LLM 调用 |
+| `ACT` | 一次 Action Resolver 调用 |
+
+Fragment 内部可以包含多个关系算子，但默认 PEP 图把它显示为一个执行单元；点击节点再查看内部 operator tree。
+
+`operator_tree` 本身也是 discriminated typed IR，至少包含：
+
+| 内部算子 | 关键字段 |
+|---|---|
+| `SCAN` | Source object、snapshot、required columns |
+| `FILTER` | typed Predicate + input |
+| `JOIN` | relation id、join semantics、left/right、已证明的 cardinality |
+| `PROJECT/DERIVE` | 命名 typed Expression 列表 |
+| `AGGREGATE` | group keys、partial/final aggregate state、input |
+| `WINDOW` | partition/order/window expression |
+| `TOP_N` | typed order keys、take、ties、input |
+
+物理字段使用 `ColumnRef`，常量使用 typed literal，任何节点都不保存待解析的 SQL 表达式字符串。本文后续 PEP 示例中的 `"region=华东"`、`"sales_amount DESC"` 等字符串只是为了阅读简洁的**摘要写法**；正式模型必须使用对应 typed Predicate/Order Expression，最终 SQL 只存在于 Renderer 产出的 compiled call 中。
+
+### 6.3 PEP Schema
+
+```jsonc
+{
+  "version": 3,
   "nodes": [
-    { "id": "n1", "op": "FILTER",
-      "concept": "dim.period", "value": "上季度(2024Q1)" },
-    { "id": "n2", "op": "AGGREGATE", "deps": ["n1"],
-      "concept": "metric.gross_margin", "filter": { "地区": "华东" } },
-    { "id": "n3", "op": "AGGREGATE", "deps": ["n1"],
-      "concept": "metric.gross_margin", "filter": { "地区": "华南" } },
-    { "id": "n4", "op": "AGGREGATE", "deps": ["n1"],
-      "concept": "metric.gross_margin", "filter": { "地区": "华东" }, "groupBy": "月" },
-    { "id": "n5", "op": "SELECT",
-      "concept": "doc.evidence", "query": "华东 毛利 下滑" },
-    { "id": "n6", "op": "ASK", "deps": ["n2", "n3", "n4", "n5"],
-      "prompt": "毛利={n2} 华南={n3} 趋势={n4} 证据={n5}，解释华东为何下滑" },
-    { "id": "n7", "op": "ACT", "deps": ["n6"],
-      "action": "create_ticket", "desc": "{n6}" }
-  ]
+    {
+      "id": "p_region_metrics",
+      "kind": "SOURCE_FRAGMENT",
+      "source_instance": "sales_sql",
+      "operator_tree": {},
+      "depends_on": [],
+      "wave": 1,
+      "realizes": [
+        {
+          "logical_node": "east_sales",
+          "logical_field": "value",
+          "physical_field": "east_sales"
+        }
+      ],
+      "estimates": { "rows": 1, "bytes": 64, "cost": 0.12 }
+    }
+  ],
+  "context": {
+    "parallelism": 4,
+    "security_domain": "user:yanbin",
+    "logical_outputs": {}
+  }
 }
 ```
 
-### ② 优化器 plan（翻译成 Resolver 调用 + 透传用户）
+`realizes` 是逻辑/物理隔离的关键：
 
-```json
-{
-  "as_user": "zhangsan@beone",
-  "plan": [
-    { "node": "n1+n2+n3+n4", "resolver": "dwh.sql", "fused": true,
-      "call": "SELECT region, month, SUM(gross_margin) FROM fact_sales WHERE region IN('华东','华南') AND period='2024Q1' GROUP BY region, month",
-      "trust": 0.98, "user_scoped": true },
-    { "node": "n5", "resolver": "kb.vector",
-      "call": { "q": "华东 毛利 下滑", "topk": 3 } },
-    { "node": "n6", "resolver": "agent.sales",
-      "call": { "ask": "毛利={n2} 华南={n3} 趋势={n4} 证据={n5}，解释下滑" },
-      "user_scoped": true },
-    { "node": "n7", "resolver": "ticket.http",
-      "call": { "POST": "/tickets", "body": { "desc": "{n6}" } },
-      "user_scoped": true }
-  ]
-}
-```
+- 一个 PEP 节点可以实现多个 SQG 节点；
+- 一个 SQG 节点也可能由多个 PEP Fragment 协作实现，最终映射由最后一个 Fragment 发布；
+- Coordinator 使用映射注册逻辑结果；
+- 不需要 PROJECT 物理节点。
 
-> **FILTER(n1) + 3×AGGREGATE(n2·n3·n4) 同源 → 优化器融成一条 SQL（省 2 趟往返）**；`kb.vector` 是公共文档，不带 `user_scoped`；其余 Resolver 声明支持用户级权限，执行时收到 `as_user`。
+### 6.4 融合策略
 
-### ③ 执行结果（协调器回填 + 裁决后）
+#### A. 扫描和公共子计划共享
 
-```json
-{
-  "n2": { "毛利": 12000000, "环比": -0.15, "source": "数仓", "trust": 0.98 },
-  "n3": { "毛利": 16000000, "环比": 0.04, "source": "数仓" },
-  "n4": { "series": [480, 420, 300], "unit": "万" },
-  "n5": { "docs": ["价格政策", "涨价通报"] },
-  "n6": { "answer": "华东主因:大客户减采30%+原材料涨价；华南靠新品拉动未受冲击",
-          "evidence": ["n5#1"], "trust": 0.82 },
-  "n7": { "ticket": "#4521", "status": "created" },
-  "verdict": { "毛利": "以 n2 为准(trust 0.98)", "loser": "某源 1180万 → 丢弃数字" }
-}
-```
+满足以下条件时可共享：
 
-> n1 FILTER 不产生独立结果（已折进 n2·n3·n4 的同一条 SQL 的 WHERE）。
+- 相同 Source Instance、用户安全域和快照；
+- 相同或可兼容的实体域/关系路径；
+- 表达式和 NULL/时区/精确性规则兼容。
 
-**一句话总纲：SQG（问什么）→ plan（谁来答 · 怎么调 · 谁在问）→ result（答什么），三段一一对应。**
+即使最终 group、HAVING 或 TopN 不同，也可以共享前缀后分支，不能再用“有 TopN 就完全禁止融合”的粗规则。
 
----
----
+#### B. 同范围多测度融合
 
-# 第二部分 · 后端工程实现
-
-> 本部分讲「后端怎么落地」。**领域模型（Concept / Binding / Resolver / SQG / 运行引擎）不再重复定义，一律引用上文第 3、5、6、7 节。** 本部分只写后端特有内容：技术选型、架构、存储实现、API、SDK、配置、阶段。
-
-## 16. 后端目标与两种形态
-
-后端把用户一句话变成流水线：**提问 → 编译 → 调度 → 协调 → 生成 → 答案 + 血缘 + 动作回执**（模型见第 7 节）。交付两种形态，共用同一内核：
-
-| 形态 | 载体 | 使用者 |
-|---|---|---|
-| **① REST API** | FastAPI 服务（`backend/app`） | 前端 UI、外部系统 HTTP |
-| **② SDK** | `nexus` 包（框架无关，可 `pip` 安装） | 其他 Python 程序直接 `import` |
-
-**核心约束**：引擎内核（`nexus` 包）不依赖任何 Web 框架；API 只是内核之上的薄适配。两种形态共用同一个 `NexusClient`，永不分叉。
-
-## 17. 后端技术选型
-
-| 关注点 | 选型 | 理由 |
-|---|---|---|
-| 语言 | Python 3.11+ | LLM 编排 + 数据连接器生态最成熟 |
-| Web 框架 | FastAPI + uvicorn | 异步原生、OpenAPI、SSE 流式 |
-| 数据模型 | pydantic v2 | 校验 + LLM 结构化输出目标类型 |
-| 并发 | asyncio | 协调器分波并行（`asyncio.gather`） |
-| 主数据库 | **Azure SQL Database** | 本体 + 运行审计存储（生产） |
-| DB 访问 | SQLAlchemy Core + pyodbc（ODBC Driver 18） | 对接 Azure SQL；本地可切 SQLite |
-| LLM | openai SDK（兼容 Azure OpenAI） | 编译器结构化生成、生成器答案 |
-| 容器 | 三层 Docker（base 含 msodbcsql18） | Azure SQL 需 ODBC 驱动 |
-
-> 密钥走环境变量 / Key Vault，绝不入库、不进日志。
-
-## 18. 后端总体架构
-
-### 18.1 分层 → 模块映射
-
-| 层 | 职责 | 后端模块 |
-|---|---|---|
-| L4 意图层 | NL → SQG | `nexus/engine/compiler.py` |
-| L3 认知层（核心） | 调度 · 协调 · 生成 | `nexus/engine/{Optimizer,coordinator,generator}.py` |
-| L2 语义层 | 本体 + 能力清单 | `nexus/core/*` · `nexus/ontology/*` · `nexus/registry.py` |
-| L1 接入层 | 数据 / Agent / 动作 | `nexus/resolvers/*` |
-| 竖切面 | 权限 / 血缘 / 成本 | `policy` / `provenance` / 运行审计表 |
-
-### 18.2 内核 vs 宿主包结构
-
-```
-backend/app/
-├─ main.py bootstrap.py config*.json config.py   ← FastAPI 宿主 + 配置
-├─ api/v1/                                         ← HTTP 适配层（薄）
-├─ core/services.py                                ← IoC 容器
-├─ models/                                         ← API 请求/响应模型
-├─ utils/                                          ← logger / json
-└─ nexus/            ★ 引擎 SDK（框架无关，可独立发包）
-   ├─ client.py      NexusClient 门面
-   ├─ core/          领域模型（见第 3/5/6 节）
-   ├─ resolvers/     Resolver 接口 + 五类实现（见第 5 节）
-   ├─ engine/        Compiler / Optimizer / Coordinator / Generator（见第 7 节）
-   ├─ ontology/      本体存储
-   └─ registry.py    Resolver 注册表 + 选源竞标
-```
-
-## 19. 本体存储实现（Azure SQL）
-
-`OntologyStore` 抽象类两套实现：`AzureSqlOntologyStore`（生产，pyodbc）/ `SqliteOntologyStore`（本地）。切换由 `config.nexus.ontology.backend` 决定，引擎无感。
-
-**Concept↔Binding 关联（定论）**：一对多。**外键 `Binding.concept_id` 为唯一真相**；`Concept.bindings`（前向列表）作为便捷/派生视图（读时由 `concept_id` 反查组装），避免两处存储漂移。
-
-**DDL 草案**（复合字段以 JSON 存于 `NVARCHAR(MAX)`，读时反序列化为 pydantic）：
+多个 SQG AGGREGATE 具有相同 scope 和 grain 时，一次扫描/分组输出多列：
 
 ```sql
--- 概念（5 种 kind 同表；kind 专属字段存 attrs JSON）
-CREATE TABLE nexus_concepts (
-    id NVARCHAR(200) PRIMARY KEY, kind NVARCHAR(32) NOT NULL, name NVARCHAR(200) NOT NULL,
-    semantics NVARCHAR(MAX), synonyms NVARCHAR(MAX),                       -- JSON
-    attrs NVARCHAR(MAX),   -- JSON：kind 专属：attribute.{entity,type}；metric.{expr}；
-                           --   relation.{left,right,cardinality,direction,join_type}；derivation.{target,sources,transform}
-    policy NVARCHAR(MAX), provenance NVARCHAR(MAX),                        -- JSON
-    updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-);  -- 不存 bindings 列，由 nexus_bindings.concept_id 反查
-
--- 绑定（只挂 entity→表 / attribute→列；无 joins，join 归 relation）
-CREATE TABLE nexus_bindings (
-    id NVARCHAR(200) PRIMARY KEY, concept_id NVARCHAR(200) NOT NULL,
-    resolver NVARCHAR(100) NOT NULL, kind NVARCHAR(32) NOT NULL,   -- table|column|prompt|file|endpoint
-    expr NVARCHAR(MAX),                                            -- 表名/列名/表达式/模板/路径/端点
-    confidence FLOAT NOT NULL DEFAULT 1.0,
-    CONSTRAINT FK_binding_concept FOREIGN KEY (concept_id) REFERENCES nexus_concepts(id)
-);
-CREATE INDEX IX_bindings_concept ON nexus_bindings(concept_id);
-
-CREATE TABLE nexus_runs (
-    run_id NVARCHAR(64) PRIMARY KEY, as_user NVARCHAR(200), question NVARCHAR(MAX) NOT NULL,
-    sqg NVARCHAR(MAX), plan NVARCHAR(MAX), result NVARCHAR(MAX), verdict NVARCHAR(MAX),  -- JSON
-    status NVARCHAR(32) NOT NULL, cost_ms INT, created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-);
-
-CREATE TABLE nexus_run_steps (
-    id BIGINT IDENTITY PRIMARY KEY, run_id NVARCHAR(64) NOT NULL, node_id NVARCHAR(64) NOT NULL,
-    resolver NVARCHAR(100), call NVARCHAR(MAX), output NVARCHAR(MAX), trust FLOAT, verdict NVARCHAR(MAX),
-    started_at DATETIME2, ended_at DATETIME2,
-    CONSTRAINT FK_step_run FOREIGN KEY (run_id) REFERENCES nexus_runs(run_id)
-);
+SELECT region,
+       SUM(amount) AS sales_amount,
+       SUM(amount - cost) AS gross_profit
+FROM ...
+WHERE ...
+GROUP BY region
 ```
 
-## 20. API 设计
+#### C. 不同范围条件聚合
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/health` | 健康检查 |
-| POST | `/api/v1/ask` | 一句话提问 → 答案+血缘（同步） |
-| POST | `/api/v1/ask/stream` | 同上，SSE 流式 |
-| GET/POST | `/api/v1/concepts` | 概念读写 |
-| GET/POST | `/api/v1/bindings` | 绑定读写 |
-| GET | `/api/v1/resolvers` | 列出 Resolver 能力清单 |
-| GET | `/api/v1/runs/{run_id}` | 查某次运行的血缘 |
+提取公共谓词到扫描层，差异谓词进入条件聚合：
 
-约定：请求/响应模型在 `models/api.py`，与领域模型解耦；统一响应 `{ state, message, data }`；流式走 `text/event-stream`；鉴权用 MSAL/JWT，`as_user` 从 token 解析（不信任前端传入）；错误码 501（未实现）/422（校验）/401（鉴权）/502（源错误，附血缘）。
-
-## 21. SDK 设计
-
-`NexusClient`（`nexus/client.py`）装配本体存储 + 注册表 + 四段引擎，唯一入口：
-
-```python
-from nexus import NexusClient
-from nexus.resolvers import SqlResolver
-nexus = NexusClient(config)                       # config: {ontology, llm}
-nexus.register_resolver(SqlResolver("dwh.sql", {...}))
-answer = await nexus.ask("华东上季度毛利为什么下滑？", as_user="zhangsan@beone")
+```text
+华东2024销售额
+华南2024销售额
 ```
 
-API 层与 SDK 复用同一个 `NexusClient`（由 IoC 容器单例托管）；`ask` / `ask_stream` 两个入口。
+优化为：
 
-## 22. 配置与服务容器
+```sql
+WHERE order_date >= 2024-01-01
+  AND order_date < 2025-01-01
+  AND region IN ('华东','华南')
 
-- **config**（`config.py`）：分层加载 `文件 → 环境变量`，单例；`config.{APP_ENVIRONMENT}.json` 切环境；密钥用 `APP_PREFIX` 前缀环境变量覆盖，脱敏后才记日志。
-- **services**（`core/services.py`）：IoC 容器，`services[NexusClient]` 懒加载单例。
-- **bootstrap**：`register_services()` 注册类型；`register_resolvers()` 装配各源 Resolver。
-
-## 23. LLM 集成
-
-Provider 抽象（`nexus/llm/`）封装 Azure OpenAI / OpenAI，统一 `complete(messages, schema)` 结构化输出；编译器用「JSON schema 约束 + 校验重试」保证产出合法 SQG；生成器用 Jinja2 模板产出答案；token 计量写入运行记录。
-
-## 24. 可观测性：运行记录系统（Run Recording）
-
-把每次提问（一个 run）的**四段引擎执行全程**落库，支撑「执行中前端轮询看进度」+「事后回放/审计」。三张表分层：`run`（整体）→ `run_stage`（四个引擎）→ `run_node`（协调器 DAG）。
-
-**原则**：① 增量落库（每段/每节点 start→update，不在结尾批量写）→ 轮询即可见进度；② 依赖倒置——引擎/core 不直接写 DB，定义 `RunRecorder` 接口，DB 实现从 app 层注册（与 `ApiLogSink` 同套路）；③ 与接口层日志 `nexus.api_log` 分开（那是 HTTP 层，这是引擎层）。
-
-### 24.1 `nexus.run` —— 一次提问一行
-| 列 | 类型 | 说明 |
-|---|---|---|
-| run_id | NVARCHAR(64) PK | 运行 id |
-| question | NVARCHAR(MAX) | 原始问题 |
-| as_user | NVARCHAR(200) | 提问人 |
-| state | NVARCHAR(16) | running / done / failed |
-| answer | NVARCHAR(MAX) | 最终答案 + 出处（JSON） |
-| cost_ms | INT | 总耗时 |
-| created_at / updated_at | DATETIME2 | 起止 |
-
-### 24.2 `nexus.run_stage` —— 四个引擎（每 run 4 行）
-| 列 | 类型 | 说明 |
-|---|---|---|
-| id | BIGINT IDENTITY PK | |
-| run_id | NVARCHAR(64) | → run |
-| stage | NVARCHAR(20) | compiler / optimizer / coordinator / generator |
-| seq | TINYINT | 1–4，排序 |
-| state | NVARCHAR(16) | pending / running / done / failed |
-| input | NVARCHAR(MAX) | 该引擎输入（JSON） |
-| output | NVARCHAR(MAX) | 输出（JSON）：编译→SQG、优化→物理计划、生成→答案 |
-| error | NVARCHAR(MAX) | 堆栈 |
-| logs | NVARCHAR(MAX) | 自定义日志（JSON，可选）：如编译器的完整提示词 `{prompt:{system,user}}`，以后可扩展其它记录 |
-| started_at / ended_at | DATETIME2 | |
-| cost_ms | INT | |
-| | | UNIQUE(run_id, stage) |
-
-> 「兜住四个引擎」= 一个 `stage` 枚举 + 统一的 input/output/state/耗时，四段同构。前端阶段时间线直接读这张。
-
-### 24.3 `nexus.run_node` —— 协调器 DAG 执行状态（每 run 每节点一行，**只存状态/结果**）
-
-> **结构在 plan JSON 里，状态在这张表里**（见 §7.6）。所以**不重复存** `deps`/`op`/`name`/`wave`（前端从 `run_stage` 的 plan JSON 拿）；本表只记「跑到哪、结果、耗时」，供前端轮询覆盖上色。
-
-| 列 | 类型 | 说明 |
-|---|---|---|
-| id | BIGINT IDENTITY PK | |
-| run_id | NVARCHAR(64) | → run |
-| node_id | NVARCHAR(64) | 对齐 plan JSON 里的 `nodes[].id`，如 n1 |
-| state | NVARCHAR(16) | pending / running / done / failed（决定节点/连线颜色）|
-| resolver | NVARCHAR(100) | 实际选中的源 |
-| call | NVARCHAR(MAX) | **实际执行**内容（占位符已回填的 SQL / 请求）|
-| output | NVARCHAR(MAX) | 结果（JSON）|
-| value | NVARCHAR(200) | 关键值（节点上直接显示，可选）|
-| source | NVARCHAR(200) | 来源 db:table |
-| trust | FLOAT | 信任分 |
-| error | NVARCHAR(MAX) | 堆栈 |
-| logs | NVARCHAR(MAX) | 自定义日志（JSON，可选）：如 ASK 节点生成的完整提示词 `{prompt:{system,user}}` |
-| started_at / ended_at | DATETIME2 | |
-| cost_ms | INT | |
-| | | UNIQUE(run_id, node_id) |
-
-> 前端 VueFlow：从 `run_stage`(optimizer).output 画结构，用本表按 `node_id` 覆盖 `state`→颜色、`value`/`source`→节点标注；连线颜色随下游节点 `state`。不单独建 edge 表。
-
-**读取/回放**：BFF `GET /runs/{run_id}` 读 `run + run_stage + run_node` 合成；前端 `state=running` 时每 ~0.5s 轮询刷新时间线 + DAG，`done` 停轮询；历史回放同一接口读已完成 run。
-
-> 旧的 `nexus.runs` / `nexus.run_steps`（§19 早期草案）由本节三表替代。
-
-## 25. 错误处理与取消
-
-`ExecContext.cancellation_token` 贯穿执行，协调器每波检查取消；单节点失败隔离（记入血缘并在裁决/生成时降级说明）；ACT 类动作带 `idempotency_key` 防重复。
-
-## 26. 测试策略
-
-| 层级 | 对象 | 手段 |
-|---|---|---|
-| 单元 | 模型校验、拓扑分波、回填、裁决、竞标打分 | pytest，纯函数 |
-| 契约 | Resolver 接口一致性 | 抽象测试套件，各实现复用 |
-| 集成 | 本体存储（SQLite 内存库）、SqlResolver 取数 | pytest + 临时库 |
-| 端到端 | 示例问题「华东毛利下滑」走完四段 | stub LLM + 内存 SQL 源，断言答案结构与血缘 |
-
-贯穿用例固定为第 15 节附录的三段 JSON，作为回归基线。
-
-## 27. 后端目录结构
-
-```
-backend/app/
-├─ main.py bootstrap.py config.py config.json config.development.json
-├─ api/v1/  router.py  endpoints/(ask concepts bindings resolvers runs)
-├─ core/    services.py deps.py
-├─ models/  base.py api.py
-├─ utils/   logger.py json_utils.py
-└─ nexus/
-   ├─ client.py registry.py
-   ├─ core/     models.py capabilities.py sqg.py context.py
-   ├─ resolvers/ base.py sql.py vector.py agent.py rest.py action.py
-   ├─ engine/    compiler.py Optimizer.py coordinator.py generator.py
-   ├─ ontology/  store.py azure_sql.py sqlite.py
-   └─ llm/       base.py azure_openai.py
+SUM(CASE WHEN region='华东' THEN amount END)
+SUM(CASE WHEN region='华南' THEN amount END)
 ```
 
-## 28. 后端开发阶段 P0–P4
+公共谓词是规范化 predicate AST 的公共合取项，不通过字符串比较得出。
 
-原则：每阶段一个可演示闭环 + 验证一个核心假设；P0 就把三大接口（Concept/Resolver/SQG）定死，之后只加实现、不改范式。
+#### D. 聚合共享、后处理分支
 
-| 阶段 | 目标 | 范围 | 验收 |
-|---|---|---|---|
-| **P0** ★ | 一个 SQL 源能问答 | 领域模型 + `SqliteOntologyStore` + `SqlResolver`（真实取数）+ 四段引擎最小实现 + `NexusClient.ask` + `/ask\|concepts\|bindings\|resolvers` + 运行记录落库；编译器可先规则/模板兜底 | 对一张 `fact_sales` 问「华东上季度毛利」返回数值+血缘；`/ask` 不再 501 |
-| **P1** | 跨源融合 | `VectorResolver`（RAG）+ 合并/裁决完善 + LLM 编译器上线 + Azure SQL 本体存储 | 命中「数仓数值 + 知识库佐证」合并成一份，冲突按信任分裁决 |
-| **P2** | 智能体源 | `AgentResolver` + `ASK` 闭环 + 接一个真实 Data Agent | 归因由 Agent 回答并返回结构化证据 |
-| **P3** | 分析即行动 | `ActionResolver` + `ACT` + 幂等 + `RestResolver` | 问答后自动建复盘工单并回执，血缘可查 |
-| **P4** | 自动建本体 | `describe/sample` + LLM 推断候选 + 人工确认台 | 对接新库半自动生成可用本体 |
+“销售额前三地区”和“毛利后三地区”可以共享扫描、关系和同 grain 聚合，然后各自排序和截断。SQG 仍保留两个业务节点。
 
-> **实现进展（P0 已完成，2026-07）**：本体存储直接用 Azure SQL（`nexus` schema：concepts / bindings / runs / run_steps）；系统 DB 连接放顶层 `sql_db` 配置。**Resolver 与 LLM 均为「注册表 + 凭据」模式**：元数据存 `nexus.resolvers` / `nexus.llms`（非密配置 + credential_name），密文（连接串 / API Key）存 Azure Key Vault，启动时经 `azure_keyvault_credential_provider`（DefaultAzureCredential）装配。`.env` / config 中不含任何 resolver/LLM 明文。LLM 编译器（schema 约束 NL→SQG，规则兜底）已提前上线。
+#### E. 纵向下推
 
-## 29. 里程碑与风险
+同一 Source Instance 支持时，可以把：
 
-| 风险 | 影响 | 缓解 |
+```text
+Filter → TimeBucket → Aggregate → ResultFilter → TopN → Derive
+```
+
+编译成一条 SQL/查询；不支持的后缀提升到 Compute Fragment。
+
+### 6.5 融合合法性
+
+Optimizer 必须证明：
+
+- grain 相同或显式可对齐；
+- domain 和未匹配策略不变；
+- 关系基数不会导致 fan-out；
+- 公共谓词提取不产生原任务不存在的分组行；
+- `NULL`、空集合、除零语义一致；
+- time bucket 的时区、日历和粒度一致；
+- exact/approximate 要求一致；
+- 安全域和数据快照一致；
+- 中间没有阻塞语义，如 DISTINCT、窗口、非确定函数或先 TopN 后聚合。
+
+无法证明时保留独立计划，正确性优先于少一次扫描。
+
+### 6.6 下推顺序
+
+通常按以下顺序形成候选：
+
+1. 列裁剪；
+2. 单源谓词下推；
+3. 同源 entity JOIN 下推；
+4. 可证明安全的源内预聚合；
+5. 完整聚合、时间桶和派生表达式下推；
+6. 聚合后过滤下推；
+7. 全局排序/TopN 下推；
+8. 不支持部分放入 Compute Fragment。
+
+下推由 capabilities 和语义证明共同决定；能力支持不代表一定下推。
+
+### 6.7 成本选择
+
+候选 PEP 至少比较：
+
+- 估算行数、行宽和传输字节；
+- 过滤选择率、分组基数；
+- 源端 CPU/并发压力；
+- 网络和 egress 成本；
+- DuckDB 内存及溢写风险；
+- 往返次数和典型延迟；
+- 是否需要重复扫描；
+- 源的信任、时效和用户权限能力。
+
+缺少统计信息时采用保守规则，并把选择原因记录进 optimizer logs。
+
+---
+
+## 7. 跨源实体与关系处理
+
+### 7.1 基本原则
+
+1. SQG 节点只引用业务 metric/dimension，不写 JOIN 和数据源。
+2. Optimizer 从引用概念提取实体，通过 relation 图求连接树。
+3. Bound Logical Plan 标注每个 Scan 所属 Source Instance。
+4. 同一 Source Instance 的连续子树先合并成 Source Fragment。
+5. 跨 Source Instance 边形成 Exchange；最终在 Compute Fragment 或支持联邦能力的源完成。
+6. 当前式“各源取数 → DuckDB JOIN → 聚合”作为通用兜底，但不是唯一策略。
+
+### 7.2 跨源候选策略
+
+#### 策略 A：投影/过滤后拉取，本地 JOIN
+
+最通用。每个源只取必要列和满足本源谓词的行，Exchange 到 DuckDB 完成 JOIN、聚合和 TopN。
+
+适用于无法证明预聚合安全、统计函数不可分解或关系复杂的场景。
+
+#### 策略 B：事实侧预聚合
+
+若事实→维度是可信 many-to-one，并且统计量可分解，则事实源先按 JOIN key 汇总，再跨源 JOIN：
+
+```text
+订单明细 5000 行
+  → 按 customer_id SUM(amount) 约 1000 行
+  → Exchange
+  → 关联 customer→region
+  → 按 region 再 SUM
+```
+
+#### 策略 C：维度先查 + Semi-Join 下推
+
+当过滤位于小维表时：
+
+1. 维度源先查满足条件的 key；
+2. 通过参数列表、临时表或批量表值把 key 推给事实源；
+3. 事实源只扫描相关数据。
+
+必须考虑参数上限、key 数量和源是否支持临时表。
+
+#### 策略 D：广播小表
+
+小维表可以广播到计算引擎，或在目标源支持临时表时推入事实源做 JOIN。
+
+#### 策略 E：联邦/远程 JOIN
+
+只有 Resolver 明确声明联邦能力、权限和一致性满足要求时使用；不能因为两个实体都叫 SQL 就假设可跨库 JOIN。
+
+### 7.3 聚合可分解性
+
+| 统计量 | 可下推的部分状态 | 最终合并 |
 |---|---|---|
-| NL→SQG 准确率 | 编译错→答非所问 | schema 约束 + 校验重试 + P0 规则兜底 |
-| 跨源主键对齐 | 合并错 | 以 Concept id 为主键，Binding 显式声明 grain |
-| Agent 返回非结构化 | 无法裁决/血缘 | 约定 Agent 返回「答案+证据」结构，缺失降级 |
-| Azure SQL 连接/驱动 | 部署失败 | 三层 Docker 预装 msodbcsql18；连接串走环境变量 |
-| 本体自动生成质量 | 人工成本高 | 高置信自动收、低置信标红人工确认 |
+| SUM | partial sum | SUM(partial_sum) |
+| COUNT | partial count | SUM(partial_count) |
+| MIN/MAX | partial extreme | MIN/MAX(partial) |
+| AVG | SUM + COUNT | total_sum / total_count |
+| VARIANCE/STDDEV | count + sum + sum_sq 或稳定状态 | merge state 后 finalize |
+| 精确 MEDIAN/PERCENTILE | 通常不可仅合并分组中位数 | 拉明细或由同一引擎完整计算 |
+| 近似分位数 | 可合并 sketch，前提是源支持同一算法 | merge sketch 后 finalize |
 
----
----
+预聚合还必须满足：
 
-# 第三部分 · 前端设计
+- JOIN 不会复制事实行；
+- 未匹配策略保持一致；
+- 时间有效关系在预聚合 grain 中仍可正确关联；
+- 度量 additivity 允许沿该维度汇总。
 
-> 前端是 .NET 解决方案（`frontend/DataNexus`：`datanexus.client` Vue 前端 + `DataNexus.Server` + `DataNexus.Library`）。本部分待补。
+### 7.4 全局 TopN
 
-## 30. 前端设计（待补）
+TopN 必须应用于完整的全局聚合结果。禁止把各源/分片各自 Top 3 直接合并后当成全局 Top 3，除非使用可证明的分布式候选算法并进行最终全局排序。
 
-规划要点（占位，后续展开）：
-- **技术栈**：Vue 3 + Vite + TypeScript + Element Plus；通用基础设施 `src/common`（`API.ts`/`APIService.ts`/`AppConfig.ts`/`MSAL.ts`）。
-- **鉴权**：MSAL（`@azure/msal-browser`），token 传后端由其解析 `as_user`。
-- **核心界面**：对话提问框 → 流式答案（SSE）→ 血缘/来源展开 → 动作回执卡片。
-- **本体管理台**：Concept / Binding 的浏览与人工确认（对接 P4 自动建本体）。
-- 详细设计待与后端 API（第 20 节）联调时补齐。
+### 7.5 示例：销售额排名前三的区域
 
----
----
-
-# 第四部分 · as-built 实现细化（2026-07）
-
-> 本部分记录当前**已实现**的与前文设计有差异或扩展的细节。前文（第 1–30 节）是设计愿景，本部分是**落地事实**，冲突以本部分为准。
-
-## 31. 本体数据模型（as-built）
-
-### 31.1 存储形态：单块 graph JSON
-
-实现上，一份本体整体存为**一行**（`nexus.ontology`），`graph` 列是一整块 JSON，而非 §19 草案的 `nexus_concepts`/`nexus_bindings` 分表。graph 结构：
+SQG 仍只有一个业务节点：
 
 ```jsonc
 {
-  "entities":    [ { id, name, semantics, synonyms, resolver, table, key, attributes:[...], layout } ],
-  "relations":   [ { id, name, from_entity, from_key, to_entity, to_key, synonyms, semantics } ],
-  "metrics":     [ { id, name, synonyms, semantics, expr } ],
-  "derivations": [ { id, name, synonyms, semantics, prompt, inputs, resolver } ],
-  "actions":     [ { id, name, synonyms, semantics, action, desc, resolver } ],
-  "resolvers":   [ { name, type } ]     // ★ 本体挂载的能力源，见 §33
+  "id": "top_regions",
+  "operator": "AGGREGATE",
+  "name": "销售额排名前三的区域",
+  "spec": {
+    "subject": { "entity": "entity.fact_order" },
+    "dimensions": [
+      {
+        "kind": "attribute",
+        "concept": "attribute.dim_region.area",
+        "output": "region"
+      }
+    ],
+    "measure": { "metric": "metric.sales_amount", "output": "sales_amount" },
+    "ranking": {
+      "by": "sales_amount",
+      "direction": "DESC",
+      "take": 3,
+      "ties": "EXCLUDE",
+      "tie_breakers": [{ "field": "region", "direction": "ASC" }]
+    },
+    "domain_policy": { "unmatched": "ERROR_ON_UNMATCHED" },
+    "result": { "kind": "RANKING", "grain": ["region"] }
+  },
+  "depends_on": []
 }
 ```
 
-- `nexus.ontology` 关键列：`ontology_id, name, description, owner, visibility(private|shared|public), state, graph(JSON)`。
-- Binding 不单独存表：entity 的 `resolver`+`table`、attribute 的 `column` 就是绑定；加载时 `json_ontology.py` 摊平成 `Concept` + `Binding`。
+假设：
 
-### 31.2 属性四要素（role / dtype / additivity）
+```text
+fact_order.csv --customer_id--> SQL dim_customer --region_id--> SQL dim_region
+```
 
-每个 attribute 带四个语义要素（见 §3.3）：
+推荐 PEP：
 
-| 字段 | 取值 | 含义 |
-|---|---|---|
-| `role` | `dimension` / `measure` | 维度=可过滤+可分组；度量=可计算+可过滤 |
-| `dtype` | `number` `text` `date` `bool` `unknown` | 粗粒度语义类型 |
-| `additivity`（仅度量） | `additive` / `semi_additive` / `non_additive` | 可加性（计算指导） |
-| `column` | 列名 | 物理绑定 |
+```text
+CSV Source Fragment：按 customer_id 预聚合 SUM(amount)
+             │ Exchange
+             ├──────────────┐
+SQL Source Fragment：dim_customer JOIN dim_region，输出 customer_id→region
+             │ Exchange     │
+             └──────────────┤
+DuckDB Compute Fragment：JOIN → 按 region 再 SUM → 全局 Top 3
+```
 
-**能力矩阵**：
-
-| role | WHERE 过滤 | group_by | 聚合 | HAVING |
-|---|---|---|---|---|
-| dimension | ✓（等值/比较） | ✓ | ✗ | ✗ |
-| measure | ✓（比较为主） | ✗ | ✓（按 additivity） | ✓（对聚合值） |
-
-### 31.3 粗粒度类型体系
-
-- concept 是语义层，不绑死数据库原生类型。定义 5 个粗类型：`number/text/date/bool/unknown`。
-- 各源在 `describe()` 里把原生类型映射进来（DB-specific 映射放 resolver 内）。SQL Server 映射：int/decimal/float/money…→number；char/varchar/nvarchar/text…→text；date/datetime/time…→date；bit→bool；其它→unknown。
-- 导入时按 dtype 定默认 role：主键或非数值→`dimension`；数值→`measure`（默认 `additivity=additive`）。**已移除**旧的按列名关键词猜度量的 `_MEASURE_HINT`。
-
-### 31.4 表结构刷新（refresh）
-
-本体编辑器支持从数据库重新探测同步表结构：
-- **每个实体一个刷新按钮** + **编辑器顶部全局刷新**。
-- 合并规则：只更新**结构属性**（`column`/`dtype`）；**保留用户定义**（`role`/`additivity`/`name`/`synonyms`/`semantics`）。新列按 dtype 取默认角色加入；删除的列移除；metrics/relations/resolvers 不动。
-
-## 32. AGGREGATE 增强（as-built）
-
-实现的 AGGREGATE 节点 `params` 远超 §6.2 草案，支持：
+对应的物理契约示意：
 
 ```jsonc
 {
-  "operator": "AGGREGATE",
-  "concept": "metric.gross_margin | null",   // 有预定义指标就填；没有则 null
-  "params": {
-    "measure": "attribute.fact_order.quantity", // 临时聚合：无指标时用某度量列
-    "agg": "SUM",                               // SUM|AVG|MIN|MAX|COUNT
-    "filters": [ { "concept": "<attr id>", "op": ">", "value": 1000 } ],
-    "group_by": "attribute.dim_product.product_name", // 仅维度
-    "order": "desc", "limit": 3,                // TopN
-    "having": { "op": ">", "value": 1000 }      // 聚合后过滤
+  "nodes": [
+    {
+      "id": "s_sales_by_customer",
+      "kind": "SOURCE_FRAGMENT",
+      "source_instance": "orders_csv",
+      "operator_tree": {
+        "kind": "AGGREGATE",
+        "group_by": ["customer_id"],
+        "outputs": [{ "name": "customer_sales", "aggregate": "SUM", "value": "amount" }],
+        "input": { "kind": "SCAN", "entity": "entity.fact_order" }
+      },
+      "depends_on": [],
+      "realizes": []
+    },
+    {
+      "id": "s_customer_region",
+      "kind": "SOURCE_FRAGMENT",
+      "source_instance": "masterdata_sql",
+      "operator_tree": {
+        "kind": "PROJECT",
+        "fields": ["customer_id", "region_id", "area"],
+        "input": {
+          "kind": "JOIN",
+          "relation": "relation.customer_region",
+          "left": { "kind": "SCAN", "entity": "entity.dim_customer" },
+          "right": { "kind": "SCAN", "entity": "entity.dim_region" }
+        }
+      },
+      "depends_on": [],
+      "realizes": []
+    },
+    {
+      "id": "x_sales",
+      "kind": "EXCHANGE",
+      "mode": "MATERIALIZE",
+      "from": "s_sales_by_customer",
+      "to": "c_top_regions",
+      "depends_on": ["s_sales_by_customer"],
+      "realizes": []
+    },
+    {
+      "id": "x_region_map",
+      "kind": "EXCHANGE",
+      "mode": "BROADCAST",
+      "from": "s_customer_region",
+      "to": "c_top_regions",
+      "depends_on": ["s_customer_region"],
+      "realizes": []
+    },
+    {
+      "id": "c_top_regions",
+      "kind": "COMPUTE_FRAGMENT",
+      "engine": "duckdb",
+      "operator_tree": {
+        "kind": "TOP_N",
+        "take": 3,
+        "order": ["sales_amount DESC", "region ASC"],
+        "input": {
+          "kind": "AGGREGATE",
+          "group_by": ["region_id", "area"],
+          "outputs": [{ "name": "sales_amount", "aggregate": "SUM", "value": "customer_sales" }],
+          "input": {
+            "kind": "JOIN",
+            "relation": "relation.order_customer",
+            "left": { "kind": "INPUT", "exchange": "x_sales" },
+            "right": { "kind": "INPUT", "exchange": "x_region_map" }
+          }
+        }
+      },
+      "depends_on": ["x_sales", "x_region_map"],
+      "realizes": [{ "logical_node": "top_regions", "physical_result": "result_set" }]
+    }
+  ]
+}
+```
+
+若 relation 基数未知、指标不可分解或存在时态关系，则退回：
+
+```text
+CSV 取 customer_id+amount
+SQL 源内 JOIN customer+region 并取映射
+DuckDB JOIN 明细 → 聚合 → 全局 Top 3
+```
+
+若本体明确声明 `fact_order.region_id` 直接关联 `dim_region.region_id`，Optimizer 可以选择更短路径；不能仅因字段同名自行替换。
+
+---
+
+## 8. Coordinator、结果与 Generator
+
+### 8.1 Coordinator
+
+职责：
+
+- 按 PEP `depends_on/wave` 分波执行；
+- 波内并行，遵守 Source Instance 并发限制；
+- 执行 Exchange 和 Compute Fragment；
+- 重试可恢复的源连接失败；
+- 上游失败时跳过依赖节点；
+- 根据 `realizes` 把物理结果注册为逻辑 SQG 结果；
+- 为 ASK/ACT 组装结构化输入；
+- 增量写运行状态和血缘。
+
+逻辑结果注册表示例：
+
+```jsonc
+{
+  "east_sales": {
+    "schema": [{ "name": "value", "type": "decimal", "unit": "CNY" }],
+    "rows": [{ "value": 12000000 }],
+    "physical_origin": "p_region_metrics.east_sales"
   }
 }
 ```
 
-### 32.1 指标可选 → 临时聚合（ad-hoc aggregation）
+因此 ASK 仍依赖 `east_sales` 等 SQG id，而不需要感知它们实际来自同一物理查询。
 
-- AGGREGATE 取数二选一：① `concept` 填**预定义指标**（走口径表达式，首选，可治理）；② 无合适指标时 `concept=null` + `params.{measure, agg}`（对某**度量**列临时聚合）。
-- 意义：引入实体后**不必逐个定义 metric**，"总 amount" 自动 `SUM(amount)`。指标像"派生"一样降级为**可选治理层**。
-- 校验：`SUM/AVG` 仅限 `dtype==number`；`non_additive` 度量禁 `SUM`；`measure` 必须是 role=measure 的属性。
+### 8.2 NodeResult 与血缘
 
-### 32.2 过滤操作符（filter op）
+结果不再依赖通用 `label/value` 猜测语义：
 
-- filter 元素扩为 `{concept, op, value}`，`op ∈ = != > >= < <= like in`（白名单防注入，默认 `=`）。`in` 的 value 为数组。
-- **维度和度量都可过滤**：维度常用等值，度量常用比较（`amount > 1000`）。
-- 过滤属性可跨实体，引擎据 relation 自动 JOIN。
-
-### 32.3 分组 / TopN / HAVING
-
-- `group_by`（仅维度）+ `order(desc/asc)` + `limit` → 排名/TopN，SQL 用 `TOP (n) … GROUP BY … ORDER BY value`。
-- `having:{op,value}` → 聚合后过滤（`HAVING <agg表达式> <op> ?`），典型如"总销量超 1000 的产品"。
-- 分组结果为多行 `label + value`，生成器渲染成列表。
-
-### 32.4 可加性约束（additivity）
-
-编译器把每个度量的可加性告诉 LLM，约束聚合：
-- `additive`：任意维度可 SUM/AVG/MIN/MAX。
-- `semi_additive`：跨时间维度别 SUM（用 AVG 或不按时间分组）——库存、余额、在职人数。
-- `non_additive`：禁 SUM，用 AVG 或直接取——比率、百分比、单价。
-
-## 33. Resolver 能力与本体作用域（as-built）
-
-### 33.1 能力声明（算子能力驱动，非类型名）
-
-`Resolver` 基类加两个**类级**能力声明，编译器/优化器只看能力、不看类型名：
-
-| 属性 | sql | agent | action |
-|---|---|---|---|
-| `provides_concepts`（能否贡献概念/可导入实体） | True | False | False |
-| `operators`（能执行哪些 SQG 算子） | `{SELECT,FILTER,AGGREGATE,JOIN}` | `{ASK}` | `{ACT}` |
-
-- Python `GET /resolvers` 返回 `{name, type, provides_concepts, operators}`，前端据此分流：`provides_concepts=true` → 导入实体向导；`false` → 挂载能力源选择器。
-
-### 33.2 本体作用域：resolver 挂载
-
-- 本体 `graph.resolvers = [{name,type}]` 声明它挂载了哪些能力源。
-- **有 concept 的（SQL）**：导入实体时自动挂；画布上再无任一概念引用它时自动摘除。
-- **无 concept 的（agent/action）**：编辑器"挂载能力源"手动增删，作为独立能力挂在本体上。
-- **回答问题只用本体挂载的 resolver**：`NexusClient.ask` 从 `graph.resolvers`（老本体从实体绑定推导兼容）算出**允许集**，传给优化器；优化器的算子派发（原全局 `_first_of_type`）改为**在允许集内按算子能力找**（`_first_with_operator`），AGGREGATE 也校验源 ∈ 允许集。
-
-### 33.3 编译器按可用算子裁剪
-
-- 本体**可用算子集** = 所挂 resolver 的 `operators` 并集。
-- 编译器提示词据此裁剪：挂了 agent 才提供 ASK、挂了 action 才提供 ACT；无对应能力则不生成对应节点，最终自然只输出取数结果（不在答案里解释，避免硬编码）。
-- 派生(derivation)/动作(action) 概念降级为**可选具名模板**：挂了 agent 即可 ASK，ASK 的 `concept` 可为 null（自由 prompt）；有具名派生则可引用。
-- **强意图拆解指令**：多子句问题（如「取数 + 分析为什么 + 建复盘任务」）LLM 常只生成取数节点、漏掉 ASK/ACT。修复：当本体挂了 agent/action 时，在提示词最前面注入「先把问题拆成独立子意图、逐一建节点」的强指令，并显式给出意图→算子映射（分析/为什么/对比/归因→ASK；建任务/派单/复盘/执行→ACT）。仅在对应能力可用时注入。
-
-### 33.4 本体预检查（validator）
-
-使用本体前先 `validate_ontology(onto, registry)`，不通过则 `/ask` 直接报错（不建 run、不起线程），原因回前端：
-- 规则 1：本体未挂任何 resolver → 拒绝。
-- 规则 2：本体引用的 resolver 不存在/未启用 → 报错。
-- 规则可持续扩展。
-
-## 34. 规划 LLM 按 run 选择（as-built）
-
-`nexus.llms` 是**规划大脑**目录（编译器 + 本体路由用），与执行用的 resolver 解耦：
-- 提问界面加"模型"下拉；`POST /ask` 带 `llm_name`；`start_ask` 把选中 LLM 贯穿到编译器/路由器（`registry.llm(llm_name)`）；未选走 `is_default` 兜底。
-- ASK 执行体（agent resolver）用自己的 azure_openai 凭据，**与 llms 表无关**。
-
-## 35. 凭据 / LLM / 源 管理（as-built）
-
-三个管理面板 + 注册表热重载：
-
-| 面板 | 数据面 | 说明 |
-|---|---|---|
-| **凭据** | 列表走 BFF 读 `nexus.app_credential`（非敏感元数据）；详情/增删改走 **Python**（持有 Key Vault） | 敏感字段存 KV；更新必须重填敏感字段（不合并）；详情只回非敏感值 |
-| **LLM** | BFF 直连 `nexus.llms`（无密文） | CRUD + `is_default`（唯一默认）；引用 azure_openai 凭据 |
-| **源** | BFF 直连 `nexus.resolvers`（无密文） | CRUD；按类型选兼容凭据（sql↔sql、agent↔azure_openai、action↔无） |
-
-- **热重载**：`POST /api/v1/resolvers/reload` → `registry.reload()`（清空重装配），源/凭据/LLM 保存后即时生效，免重启。
-- 凭据类型自描述：`credential.get_types()` 返回字段 schema（含 `required/sensitive`），前端据此动态渲染表单。
-
-## 37. 取数下沉：QuerySpec + 方言（as-built）
-
-**原则**：优化器只做「解析绑定」，resolver 只做「语法」。优化器里不再出现任何 SQL 字符串（`SELECT/TOP/WHERE/JOIN/?` 全部下沉），换库只需加一个方言子类，优化器零改动。
-
-### 37.1 接缝（数据流）
-
-```
-SQG(逻辑)
-  → Optimizer._resolve_attr_aggregate        ← 解析 ontology 绑定（概念→物理表/列/JOIN/表达式）
-       → QuerySpec(方言中立)
-  → registry.resolver(name).compile(spec)     ← resolver 负责语法
-       → SqlResolver.compile(spec) → {sql, params}
-  → PlanNode.call = {node_id, sql, params}
-  → SqlResolver.fetch(call) 执行
+```jsonc
+{
+  "logical_node": "top_regions",
+  "schema": [
+    { "name": "region", "type": "text", "role": "dimension" },
+    { "name": "sales_amount", "type": "decimal", "unit": "CNY", "role": "measure" }
+  ],
+  "grain": ["region"],
+  "rows": [],
+  "lineage": [
+    {
+      "field": "sales_amount",
+      "concepts": ["metric.sales_amount"],
+      "sources": ["sales_csv:fact_order.csv"],
+      "physical_fragments": ["p_sales_by_customer", "p_top_regions"]
+    }
+  ]
+}
 ```
 
-`_plan_aggregate` 不再自拼 `{sql,params}`，而是拿到 `(QuerySpec, resolver)` 后 `registry.resolver(resolver).compile(spec)`，把 `node_id` 补进返回的 call。
+Lineage 同时记录：逻辑节点、物理 Fragment、源对象、查询/参数摘要、关系路径、优化改写和精确/近似标志。
 
-### 37.2 `QuerySpec`（`core/models.py`，方言中立）
+### 8.3 Generator
 
-字段的列引用**已由优化器解析成物理列**（含别名前缀）；方言层不碰绑定，只管语法：
+- 结构化数据结果优先确定性渲染 Markdown 表格；
+- ASK 输出要求 Markdown；
+- Generator 不修改任何确定性数值；
+- Web 结果保留 URL、标题、摘要和完整内容血缘；
+- 前端使用 Markdown parser + DOM sanitizer 渲染。
+
+### 8.4 ACT
+
+Action Resolver 负责：
+
+- 业务对象解析和唯一性校验；
+- 参数校验；
+- 幂等键；
+- 权限与审计；
+- 副作用执行和回执。
+
+Harness 重试时不得重复产生副作用；同一 run/逻辑节点/有效载荷使用稳定幂等键。
+
+---
+
+## 9. 权限、缓存、连接与可靠性
+
+### 9.1 权限
+
+- `as_user` 从认证 token 获取，不信任请求体；
+- `user_scoped` Resolver 以用户身份执行 RLS/数据权限；
+- 不同用户或安全域的数据扫描、缓存和中间结果禁止复用；
+- Optimizer 只能在策略允许时下推敏感字段；
+- PEP 和日志对参数、凭据、个人信息脱敏。
+
+### 9.2 缓存
+
+- Initializer 路由缓存：规范化问题 + 候选本体集合；一小时滑动过期；
+- Compiler SQG 缓存：问题 + 本体 id + 本体内容指纹 + 可用能力；只缓存成功计划；一小时滑动过期；
+- PEP 缓存可后续增加，但键必须包含 Source capabilities/version、用户安全域、统计版本和本体指纹；
+- 数据结果默认不跨用户缓存。
+
+### 9.3 数据库连接
+
+SQL Resolver 使用线程安全、自愈连接池：
+
+- 连接复用；
+- 空闲/最大寿命回收；
+- 借出前健康检查；
+- 可识别连接错误时丢弃并重试一次；
+- 进程关闭时统一释放。
+
+### 9.4 Compute
+
+跨源计算默认使用 DuckDB。设计上支持：
+
+- Arrow/批式 Exchange；
+- 内存阈值和磁盘溢写；
+- Fragment 级临时表生命周期；
+- 取消、超时和资源上限；
+- 不把大规模全量拉取作为无提示默认计划。
+
+---
+
+## 10. 存储、API 与可观测性
+
+### 10.1 核心存储
+
+- `nexus.ontology`：一份本体一行，graph JSON；
+- `nexus.resolvers`：Source/Agent/Action 注册实例；
+- `nexus.llms`：Initializer/Compiler 使用的规划模型；
+- `nexus.app_credential` + Key Vault：非敏感元数据与密文分离；
+- `nexus.run`、`nexus.run_stage`、`nexus.run_node`：运行记录。
+- 不新增 artifact 表：Initializer/Compiler/Optimizer 的中间产物写入已有 `nexus.run_stage.logs`；Optimizer 至少保存 semantic binding、bound logical plan、PEP 和 optimization trace。
+
+### 10.2 五阶段运行记录
+
+`run_stage.stage`：
+
+```text
+initializer → compiler → optimizer → coordinator → generator
+```
+
+- Initializer output：选中的本体和上下文摘要；
+- Compiler output：typed SQG；
+- Optimizer output：最终 PEP；三步完整产物和 trace 存该 optimizer stage 的 `logs.artifacts`；
+- Coordinator output：逻辑结果注册表摘要；
+- Generator output：答案和 lineage。
+
+`run_node` 记录 PEP 执行节点状态；结构来自 optimizer stage 的 PEP JSON，状态按 `node_id` 覆盖。融合后的物理节点可通过 `realizes` 关联多个 SQG 节点。
+
+### 10.3 Optimizer Artifact 存储（复用 run_stage.logs）
+
+当前实现不改变数据库表结构。四类 artifact 使用统一外壳后，按 key 写入 optimizer 行的 `logs.artifacts`：
 
 | 字段 | 含义 |
 |---|---|
-| `value_expr` | 聚合值表达式，属性 token 已替换为物理列（如 `SUM(t0.amount)`） |
-| `label_expr` | 分组维度列引用；`None` = 不分组 |
-| `from_table` / `from_alias` | 首实体物理表 / 多表时别名（单表 `None`，不带别名） |
-| `joins: [QueryJoin]` | 结构化 JOIN（`table/alias/on_left/on_right`），关系已从本体 relation 解析 |
-| `filters: [QueryFilter]` | `col` + 归一化 `op`（`= <> > >= < <= LIKE IN`）+ `value`；空值/非法项已剔除，IN 的 value 为清洗后的 list |
-| `order` / `limit` | ASC/DESC、TopN（仅分组时用） |
-| `having: QueryHaving` | 聚合后过滤 `expr/op/value` |
+| `artifact_id` | 稳定唯一 id |
+| `run_id` | 所属运行 |
+| `stage` | 产出阶段，当前主要为 optimizer |
+| `artifact_type` | `semantic_binding / bound_logical_plan / physical_execution_plan / optimization_trace` |
+| `sequence` | 同类型多版本/中间快照顺序；最终产物通常为 0 或标记 `is_final` |
+| `state` | `complete / partial / failed` |
+| `schema_version` | artifact JSON schema 版本 |
+| `producer_version` | 生成它的引擎版本 |
+| `input_artifact_id` | 上一步 artifact，形成可遍历链 |
+| `input_hash` | 输入快照摘要，用于复现和缓存诊断 |
+| `summary` | 列表页使用的有界摘要 |
+| `content` | 完整 JSON；大内容允许压缩/对象存储，但 API 行为不变 |
+| `diagnostics` | 校验错误、警告、规则拒绝原因 |
+| `created_at` | 生成时间 |
 
-**边界判断**：别名 `t0/t1`、token→列替换属于「绑定解析」（需要 ontology 知识），留在优化器，且都是标准 SQL 不是方言差异；真正的方言差异只有 TopN、参数占位符、（预留）标识符引用三处。
+写入要求：
 
-### 37.3 SQL 渲染就在 SqlResolver 里
+- 每一步完成后立即落库，不等整个 Optimizer 结束；
+- 异常处理先写 partial/failed artifact，再结束 optimizer stage；
+- artifact 不可在运行后原地修改；重试或重规划产生新 sequence；
+- 默认保留与 run 相同周期；删除 run 时级联删除或归档；
+- BFF 已返回 `run_stage.logs`；UI 在 Optimizer 标签内按 artifact key 切换浏览。若未来单次计划体积达到需要独立分页/对象存储的规模，再单独评审数据库结构，不在本次实现中隐式新增表。
 
-不另设方言体系：**任何 SQL 兼容库都直接复用 `SqlResolver`**。`compile(spec)` 直接把 `QuerySpec` 拼成 `{sql, params}`（默认 SQL Server / Azure SQL 语法）。唯一的可变点抽成一个可覆写方法 `_limit_clause(spec) -> (前缀, 后缀)`：
+Optimizer stage output 示例：
 
-| 差异点 | SqlResolver 默认 | 覆写示例 |
-|---|---|---|
-| TopN | `SELECT TOP (n)`（前缀） | Databricks/Postgres：`('', ' LIMIT n')` |
-| 参数占位符 | 类属性 `placeholder = "?"` | 需要时子类改 |
-
-个别语法有差异的库（如 Databricks 用 `LIMIT`），**子类化 `SqlResolver`、覆写 `_limit_clause` 一个方法即可**，无需独立方言类，也没有 `_DIALECTS` 注册表。
-
-### 37.4 resolver 接口
-
-`Resolver` 基类新增 `compile(spec) -> call`（默认 `NotImplementedError`）；取数型 resolver 重写。`SqlResolver.compile` 直接渲染出 `{sql, params}`；`fetch` 不变（仍执行 `{sql, params}`）。
-
-### 37.5 验证
-
-三种形态渲染与重构前**逐字一致**、参数顺序正确（WHERE→HAVING），零行为变化：
-- 单表+分组+TopN+HAVING：`SELECT TOP (3) … GROUP BY … HAVING … > ? ORDER BY value DESC`
-- 单表整体聚合：`SELECT SUM(amount) AS value FROM … WHERE … AND …`
-- 多表 JOIN + IN：`… t0 JOIN … t1 ON t0.x = t1.id WHERE t0.region IN (?,?) …`
-
-### 37.6 CSV 展望（暂缓）
-
-CSV 走同一 `QuerySpec` 接缝无障碍：`CsvResolver.compile` 用 DuckDB `read_csv(path)` 把 spec 渲染成 SQL（DuckDB 即一种方言子类）。**难点在文件获取**——绑定的不是「表」而是「文件/对象的定位方式」：本地路径 / Blob 容器+SAS / S3 / HTTP / 上传流，鉴权与生命周期各异。需在 binding 引入 `kind=file` + 独立的「文件寻址/凭据」抽象（与 SQL 连接凭据两套模型）。
-
-> 更新：CSV（本地文件）已落地，见 §38。
-
-
-## 36. 运行入口与其它工程细节（as-built）
-
-- **`start_ask` 同步建 run**：`/ask` 先同步 `start_run` 落库再返回 run_id，然后后台线程执行四段引擎；消除前端拿到 run_id 立即轮询 `runs/{id}` 时的"Run not found"时间窗。
-- **路由配置驱动**：`api/v1/router.py` 从 `config.route_prefixes` 动态挂载端点（`ask/resolvers/credentials/me`）。
-- **生成器多行渲染**：AGGREGATE 分组结果（`label+value` 多行）渲染成列表并入血缘。
-- **迁移脚本**：`app/migrate_attr_types.py` 一次性把存量本体属性迁到新枚举（role→dimension/measure，补 dtype/additivity），保留用户名称/同义词/指标/挂载源。
-
-## 38. CSV 源 + 本地文件凭据（DuckDB，as-built）
-
-`CsvResolver` 把本地文件夹里的 CSV 当数据源，用 **DuckDB** 执行；与 `SqlResolver` **完全独立、零耦合**（各自 compile/fetch/describe），resolver 之间不共享 SQL 渲染。
-
-### 38.1 凭据：一个 resolver 可对应多种凭据类型
-- 新增凭据类型 `local_file`（`services/credential.py`）：`base_dir`（必填）+ `filename`（可选）。以后 `azure_blob` 等按同机制加类即可。
-- 前端 `RESOLVER_CRED_TYPE` 从 `resolver_type→单个类型` 改为 **1:N 数组**（`csv:['local_file']`）；源管理页按数组过滤兼容凭据。
-
-### 38.2 `filename` 决定实体粒度（describe 据此枚举）
-| filename | 实体 | binding.expr | 运行时 |
-|---|---|---|---|
-| 空 | 整个文件夹一个实体 | `*.csv` | `read_csv_auto('<base>/*.csv', union_by_name=true)` |
-| 具体名 `orders.csv` | 单文件一个实体 | `orders.csv` | `read_csv_auto('<base>/orders.csv')` |
-| 通配 `sales_*.csv` | 每个匹配文件各一个实体 | 各真实文件名 | 各自 `read_csv_auto(...)` |
-
-规则：**空 = 文件夹级；填了任何值（含通配符）= 文件级**。优化器/QuerySpec 完全不用改，`from_table` 就是该 expr，`_table_source` 才包成 `read_csv_auto`（glob 补 `union_by_name`）。
-
-### 38.3 关键工程点
-- **线程安全**：协调器同波并行执行多节点，`CsvResolver.fetch` **每次用独立的内存 DuckDB 连接**（共享单连接会串结果 —— 曾导致「2024 节点拿到 2023 的值」）。describe/sample 单线程调用，用共享连接。
-- **路径防穿越**：`realpath(base_dir/locator)` 必须落在 `realpath(base_dir)` 下，否则拒绝；文件名进 `read_csv_auto` 前转义单引号。
-- **导入取名**：`importer._local` 剥离 `.csv` 等扩展名并取 basename（否则 `orders.csv` 会被命名成 `csv`、多文件撞名）。
-- **导入向导按能力过滤**：`provides_concepts===true`（非硬编码 `type==='sql'`），CSV 也能进导入向导。
-- 依赖：`duckdb>=1.5`（`requirements.txt`）。
-
-## 39. 日期区间过滤 / value_format / 属性描述（as-built）
-
-针对「日粒度日期列上的月/季/年过滤」（`order_date = '2024-07'` 会报错、语义也不对）：
-
-- **区间在编译器表达**：编译器规则——date 类型属性的期间过滤**必须用半开区间**：某月/季/年 = `>= 起始日` 且 `< 下一期间起始日`（两个 filter，值用完整 `yyyy-MM-dd`）。不再拿日期列等于「年-月」字符串。
-- **`value_format`**：每个 date 过滤带格式（token 式如 `yyyy-MM-dd`），`QueryFilter.value_format` 贯穿 编译器 `_clean_filters` → 优化器 `_build_where` → resolver。resolver 据此显式解析：CSV `CAST(strptime(?, '%Y-%m-%d') AS DATE)`、SQL Server `TRY_CONVERT(date, ?)`。无 value_format 的普通过滤（地区等）走原 `?`。
-- **属性「描述」字段**（复用 `semantics`）：本体编辑器给每个属性加「描述（给大模型的提示）」，喂进编译器属性清单。用于字符串型日期列（如 `period` 存 `2025Q1`）——描述里写明格式，用户说「2025年第一季度」LLM 就生成 `value:"2025Q1"` 等值过滤。**取值格式来自本体描述、不硬编码任何业务值**（曾删掉写死 `华东/2024Q1` 的提示词）。
-
-## 40. 聚合融合优化（合并执行 + 拆分，as-built）
-
-优化器把第一层（无依赖）**同一次扫描**的 AGGREGATE 融合成一条查询（一次扫描），再拆回各逻辑节点。按过滤情形分两档策略（**P1 同过滤 / P2 不同过滤**），共用「拆分归位」管线。
-
-### 40.0 调度：按「同一次扫描」分组，再选策略
-- 外层分组键 = **scan-key** `(resolver, FROM/JOIN, group_by)`——**不含 filters**（P2 允许过滤不同）。前提：**无 TopN、无 HAVING**（否则该节点单独执行）。
-- 每个 scan 组（≥2 成员）判定：
-  - **所有 filters 相同 → P1**（过滤上提 WHERE + 多测度 select，任意口径/复合指标都行）。
-  - **filters 不同 且 全是单聚合 `AGG(x)` → P2**（条件聚合 CASE，一次扫描分流）。
-  - **否则退化**（过滤不同 + 有复合口径难改写）：按 filters 再分子组，各子组走 P1，跨过滤不合。
-- 单聚合识别：`AGG(inner)` 正则 + 括号平衡校验；`SUM(a)-SUM(b)` 等复合口径被拒（不走 P2）。
-
-### 40.1 P1：同过滤、只测度不同（多测度 select）
-`SELECT [label,] SUM(quantity) AS v_nA, SUM(amount) AS v_nB FROM t WHERE <公共过滤> GROUP BY city`。**filters 必须逐条相同**——否则如「2023 vs 2024 总销售」会被误合成一个总数。
-
-### 40.2 P2：不同过滤、单聚合（条件聚合 CASE）
-把各成员的过滤塞进 CASE，一次扫描分流：
-```sql
-SELECT SUM(CASE WHEN <2023区间> THEN amount END) AS v_n23,
-       SUM(CASE WHEN <2024区间> THEN amount END) AS v_n24
-FROM sales            -- 表只读一遍
+```jsonc
+{
+  "artifacts": {
+    "semantic_binding": { "artifact_type": "semantic_binding", "tasks": [] },
+    "bound_logical_plan": { "artifact_type": "bound_logical_plan", "nodes": [] },
+    "physical_execution_plan": { "artifact_type": "physical_execution_plan", "nodes": [] },
+    "optimization_trace": { "artifact_type": "optimization_trace", "rules": [] }
+  }
+}
 ```
-- **正确性**：SUM/AVG/MIN/MAX/COUNT 都对 CASE 产生的 NULL 天然忽略 → `AGG(CASE WHEN f THEN x END)` = `AGG(x) WHERE f`（COUNT 也成立，无需 `SUM(CASE..1..)` 特判）。实测 n23/n24 与单查询逐位一致。
-- **比 UNION ALL 强**：UNION ALL 各分支独立扫描（不省扫描，只省往返）；CASE 才是真正 2 次→1 次扫描。
-- **参数顺序（易错点）**：CASE 的 `?` 在 SELECT 列表、早于 WHERE。resolver 编译时**先收 select 的参数、再收 WHERE 的**，与 SQL 从左到右一致。`_cond(f, params)` 统一渲染一条过滤（WHERE 与 CASE 共用，含 value_format 日期包装）。
 
-### 40.3 直接产出合并计划（不「先建再融」）
-- 优化器先把第一层 AGGREGATE 解析成 spec（不建 PlanNode），按上述键分组、选策略。
-- 合并节点 `m{n}`：`QuerySpec.selects`——P1 用 `(alias, expr)`；P2 用 `(alias, agg, inner, filters)`（渲染成 `agg(CASE WHEN filters THEN inner END)`）。
-- 每个逻辑 id 一个 **`PROJECT` 节点**（新算子）：`call={from: 合并节点, column: v_nX}`，`depends_on=[合并节点]`。
+### 10.4 API
 
-### 40.4 拆分归位（下游零改动）
-协调器对 PROJECT 节点不调 resolver，直接从 `ctx.results[合并节点]` 取该列、投影成等价单聚合结果写回 `ctx.results[逻辑id]`。因为回填 `{nX}`、血缘、生成器都读 `ctx.results[逻辑id]`，**全部照旧工作**；合并节点只在 plan（执行图）里，不在 SQG 里，天然不入答案/血缘。
+主要接口：
 
-### 40.5 双视图 + 醒目
-- **SQG 视图**：逻辑节点（nA/nB/ASK）不变。
-- **执行计划 DAG**：`合并节点 → PROJECT 拆分节点 → 下游`，合并节点打「⚡合并执行」、PROJECT 打「⚡拆分」紫色标签 + 紫边（前端自动识别：被 PROJECT 依赖的即合并节点）。直观展示「N 次扫描优化成 1 次」。
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/ask` | 启动一次运行，返回 run id |
+| GET | `/api/v1/runs/{run_id}` | 读取阶段、节点、结果和血缘 |
+| POST | `/api/v1/compile` | 编译预览 typed SQG |
+| GET/POST | `/api/v1/ontologies` | 本体读写/发布 |
+| POST | `/api/v1/ontologies/import-preview` | 探测实体、属性、关系候选 |
+| GET/POST | `/api/v1/resolvers` | Source/Agent/Action 管理 |
+| GET/POST | `/api/v1/credentials` | 凭据管理，密文进 Key Vault |
 
-## 41. 自定义日志（logs，as-built）
+统一响应信封保持 `{state, message, data}`。
 
-## 41. 自定义日志（logs，as-built）
+---
 
-`run_stage` / `run_node` 各加 `logs NVARCHAR(MAX)`（JSON），存排查用的自定义记录：
-- **编译器**：完整提示词 → `run_stage.logs`（compiler 段）`{prompt:{system,user}}`。
-- **优化器**：每节点的 `QuerySpec` + resolver 编译出的 call → `run_stage.logs`（optimizer 段）`{nodes:{nX:{query_spec, call}}}`（call 通用，SQL 源即 `{sql,params}`）。
-- **ASK**：生成的完整提示词 → `run_node.logs` `{prompt:{system,user}}`。
-- **取数节点**：resolver 返回行数 → `run_node.logs` `{row_count}`（非 ASK/ACT）。
+## 11. 完整示例：销售报告并发邮件
 
-机制：`ExecContext.stage_logs` 每段前清空、段末序列化写 `finish_stage`；`NodeResult.logs` 由 resolver 填、协调器写 `finish_node`。空则不落列（NULL）。
+问题：
 
-## 42. 本体命名空间（多本体 id 前缀，as-built）
+> 查询华东和华南2024年的销售额和毛利，再列出销量前三的产品，把报告邮件方式发颜斌。
 
-**目标**：为「一次 run 参考多个本体」打底。多本体并存时，不同本体可能有**同名 concept id**（如两本体都有 `metric.gross_margin`），必须消歧。做法：编译期给每个 concept id 加**本体前缀** `本体id::concept.id`（分隔符 `::`），让 id 全局唯一、**本体信息随 id 流动**——算子里的属性 id 自带出处，优化器/协调器无需额外的 `ontology_id` 参数即可按正确本体解析（取指标表达式、取绑定、选 resolver）。
+### 11.1 SQG
 
-### 42.1 为什么是「id 前缀」而非「节点加字段」
-- 全管线把 concept id 当**不透明字符串**传递（kind 来自 `Concept.kind` 对象，不从 id 前缀推断）。只要 id 全局唯一，大部分代码**零改**。
-- 「某节点属于哪个本体」变成**可派生**（取 id 前缀），无需在 SQGNode/PlanNode 上单独挂字段。
-- 天然不变量：**取数算子必然单本体**（跨本体无 relation → 无法 JOIN）；ASK/ACT 本体无关（只消费上游值）。跨本体综合发生在 ASK 层。
+该图保持用户友好的七个步骤：
 
-### 42.2 注入点唯一：`JsonOntology(graph, ns=ontology_id)`
-命名空间只在构造 scoped 本体处发生（`client.ask`）。`ns` 非空时 `_build` 摊平 graph 的同时**深度前缀**：
-- **前缀**：entity/attribute/relation/metric/derivation/action 的 id、attribute 的 `attrs["entity"]` 反向引用、relation 的 `from_entity/to_entity`、**metric `expr` 内嵌的 `attribute.*` token**（`_pexpr` 正则重写）。
-- **不前缀**（物理名）：列名、表名、relation 的 `from_key/to_key`、resolver 名。
-- `ns=None`（单本体/测试）= 完全等于旧行为，**向后兼容**。`ns` 先 `re.sub` 清洗成 `[A-Za-z0-9_]`。
+```text
+华东2024年销售额 ─┐
+华东2024年毛利   ─┤
+华南2024年销售额 ─┼→ 生成销售报告结论 → 发送报告邮件给颜斌
+华南2024年毛利   ─┤
+2024年销量前三产品 ┘
+```
 
-### 42.3 token 正则放宽（前缀可选）
-编译器与优化器各有一处 `_ATTR_TOKEN`，改为 `(?:[A-Za-z0-9_]+::)?attribute(?:\.[A-Za-z0-9_]+)+`——命名空间 id 与裸 id 都匹配。编译器目录/提示词**自动**带前缀（catalog 来自 `list_concepts()`），示例是占位符不受影响。
+```jsonc
+{
+  "version": 3,
+  "question": "查询华东和华南2024年的销售额和毛利，再列出销量前三的产品，把报告邮件方式发颜斌",
+  "nodes": [
+    {
+      "id": "east_sales",
+      "operator": "AGGREGATE",
+      "name": "华东2024年销售额",
+      "spec": {
+        "subject": { "entity": "entity.fact_order" },
+        "scope": {
+          "kind": "and",
+          "operands": [
+            { "kind": "time_range", "attribute": "attribute.fact_order.order_date", "start": "2024-01-01", "end_exclusive": "2025-01-01", "timezone": "Asia/Shanghai" },
+            { "kind": "comparison", "left": { "kind": "attribute", "concept": "attribute.dim_region.area" }, "operator": "EQ", "right": { "kind": "literal", "value": "华东", "data_type": "text" } }
+          ]
+        },
+        "dimensions": [],
+        "measure": { "metric": "metric.sales_amount", "output": "value" },
+        "result": { "kind": "SCALAR", "name": "华东2024年销售额", "unit": "CNY" }
+      },
+      "depends_on": []
+    },
+    {
+      "id": "east_profit",
+      "operator": "AGGREGATE",
+      "name": "华东2024年毛利",
+      "spec": {
+        "subject": { "entity": "entity.fact_order" },
+        "scope": {
+          "kind": "and",
+          "operands": [
+            { "kind": "time_range", "attribute": "attribute.fact_order.order_date", "start": "2024-01-01", "end_exclusive": "2025-01-01", "timezone": "Asia/Shanghai" },
+            { "kind": "comparison", "left": { "kind": "attribute", "concept": "attribute.dim_region.area" }, "operator": "EQ", "right": { "kind": "literal", "value": "华东", "data_type": "text" } }
+          ]
+        },
+        "dimensions": [],
+        "measure": { "metric": "metric.gross_profit", "output": "value" },
+        "result": { "kind": "SCALAR", "name": "华东2024年毛利", "unit": "CNY" }
+      },
+      "depends_on": []
+    },
+    {
+      "id": "south_sales",
+      "operator": "AGGREGATE",
+      "name": "华南2024年销售额",
+      "spec": {
+        "subject": { "entity": "entity.fact_order" },
+        "scope": {
+          "kind": "and",
+          "operands": [
+            { "kind": "time_range", "attribute": "attribute.fact_order.order_date", "start": "2024-01-01", "end_exclusive": "2025-01-01", "timezone": "Asia/Shanghai" },
+            { "kind": "comparison", "left": { "kind": "attribute", "concept": "attribute.dim_region.area" }, "operator": "EQ", "right": { "kind": "literal", "value": "华南", "data_type": "text" } }
+          ]
+        },
+        "dimensions": [],
+        "measure": { "metric": "metric.sales_amount", "output": "value" },
+        "result": { "kind": "SCALAR", "name": "华南2024年销售额", "unit": "CNY" }
+      },
+      "depends_on": []
+    },
+    {
+      "id": "south_profit",
+      "operator": "AGGREGATE",
+      "name": "华南2024年毛利",
+      "spec": {
+        "subject": { "entity": "entity.fact_order" },
+        "scope": {
+          "kind": "and",
+          "operands": [
+            { "kind": "time_range", "attribute": "attribute.fact_order.order_date", "start": "2024-01-01", "end_exclusive": "2025-01-01", "timezone": "Asia/Shanghai" },
+            { "kind": "comparison", "left": { "kind": "attribute", "concept": "attribute.dim_region.area" }, "operator": "EQ", "right": { "kind": "literal", "value": "华南", "data_type": "text" } }
+          ]
+        },
+        "dimensions": [],
+        "measure": { "metric": "metric.gross_profit", "output": "value" },
+        "result": { "kind": "SCALAR", "name": "华南2024年毛利", "unit": "CNY" }
+      },
+      "depends_on": []
+    },
+    {
+      "id": "top_products",
+      "operator": "AGGREGATE",
+      "name": "2024年销量前三产品",
+      "spec": {
+        "subject": { "entity": "entity.fact_order" },
+        "scope": { "kind": "time_range", "attribute": "attribute.fact_order.order_date", "start": "2024-01-01", "end_exclusive": "2025-01-01", "timezone": "Asia/Shanghai" },
+        "dimensions": [
+          { "kind": "attribute", "concept": "attribute.dim_product.product_name", "output": "product" }
+        ],
+        "measure": {
+          "value": { "kind": "attribute", "concept": "attribute.fact_order.quantity" },
+          "statistic": { "function": "SUM", "nulls": "IGNORE" },
+          "output": "sales_quantity"
+        },
+        "ranking": {
+          "by": "sales_quantity",
+          "direction": "DESC",
+          "take": 3,
+          "ties": "EXCLUDE",
+          "tie_breakers": [{ "field": "product", "direction": "ASC" }]
+        },
+        "result": { "kind": "RANKING", "name": "2024年销量前三产品", "grain": ["product"] }
+      },
+      "depends_on": []
+    },
+    {
+      "id": "report",
+      "operator": "ASK",
+      "name": "生成销售报告结论",
+      "spec": {
+        "instruction": "根据输入生成简洁的2024年销售报告，保留全部数值，不重新计算或修改输入数据。",
+        "format": "MARKDOWN"
+      },
+      "depends_on": ["east_sales", "east_profit", "south_sales", "south_profit", "top_products"],
+      "inputs": {
+        "east_sales": { "node": "east_sales" },
+        "east_profit": { "node": "east_profit" },
+        "south_sales": { "node": "south_sales" },
+        "south_profit": { "node": "south_profit" },
+        "top_products": { "node": "top_products" }
+      }
+    },
+    {
+      "id": "send_email",
+      "operator": "ACT",
+      "name": "发送报告邮件给颜斌",
+      "spec": {
+        "action": "EMAIL.SEND",
+        "recipient": "颜斌"
+      },
+      "depends_on": ["report"],
+      "inputs": { "report": { "node": "report", "output": "value", "row": 0 } }
+    }
+  ],
+  "outputs": ["send_email"]
+}
+```
 
-### 42.4 白拿的护栏
-跨本体无 relation → 若 LLM 误把两本体实体塞进同一聚合，§(关系连通性校验) 判定不连通 → **编译期报错**，天然禁止跨本体误聚合。
+### 11.2 典型 PEP
 
-### 42.5 验证与边界
-- 单本体端到端结果**逐位不变**（纯管线铺设）；metric expr 重写为 `SUM(onto_x::attribute.order.amount) - …`，优化器仍正确解析到物理列、关系仍成 JOIN。
-- **未做（后续）**：resolver 名是**另一个命名空间**，本步未动——两本体都叫 `dwh` 的 resolver 仍会在执行期撞，留作下一步（resolver 名/registry 按本体寻址）+ router 从「选 1」改「选一组」。
-- `ctx.ontology_id` 逻辑上不再是解析权威（本就不是），保留作审计/展示字段，多本体时再改成 set。
+Optimizer 可以把前四个指标融合成一次条件聚合；Top 产品使用另一 grain，典型计划单独查询；ASK/ACT 保持一个节点：
 
+```jsonc
+{
+  "version": 3,
+  "nodes": [
+    {
+      "id": "p_region_metrics",
+      "kind": "SOURCE_FRAGMENT",
+      "source_instance": "sales_source",
+      "operator_tree": {
+        "kind": "AGGREGATE",
+        "input": {
+          "kind": "FILTER",
+          "predicate": "2024公共时间范围 AND region IN (华东,华南)",
+          "input": { "kind": "SCAN", "entity": "entity.fact_order" }
+        },
+        "outputs": [
+          { "name": "east_sales", "aggregate": "SUM", "value": "amount", "filter": "region=华东" },
+          { "name": "east_profit", "aggregate": "SUM", "value": "amount-cost", "filter": "region=华东" },
+          { "name": "south_sales", "aggregate": "SUM", "value": "amount", "filter": "region=华南" },
+          { "name": "south_profit", "aggregate": "SUM", "value": "amount-cost", "filter": "region=华南" }
+        ]
+      },
+      "depends_on": [],
+      "wave": 1,
+      "realizes": [
+        { "logical_node": "east_sales", "logical_field": "value", "physical_field": "east_sales" },
+        { "logical_node": "east_profit", "logical_field": "value", "physical_field": "east_profit" },
+        { "logical_node": "south_sales", "logical_field": "value", "physical_field": "south_sales" },
+        { "logical_node": "south_profit", "logical_field": "value", "physical_field": "south_profit" }
+      ]
+    },
+    {
+      "id": "p_top_products",
+      "kind": "SOURCE_FRAGMENT",
+      "source_instance": "sales_source",
+      "operator_tree": {
+        "kind": "TOP_N",
+        "take": 3,
+        "order": ["sales_quantity DESC", "product ASC"],
+        "input": {
+          "kind": "AGGREGATE",
+          "group_by": ["product"],
+          "outputs": [{ "name": "sales_quantity", "aggregate": "SUM", "value": "quantity" }],
+          "input": { "kind": "FILTER", "predicate": "2024时间范围", "input": { "kind": "SCAN", "entity": "entity.fact_order" } }
+        }
+      },
+      "depends_on": [],
+      "wave": 1,
+      "realizes": [{ "logical_node": "top_products", "physical_result": "result_set" }]
+    },
+    {
+      "id": "p_report",
+      "kind": "ASK",
+      "resolver": "report_agent",
+      "depends_on": ["p_region_metrics", "p_top_products"],
+      "wave": 2,
+      "inputs": {
+        "east_sales": "logical:east_sales",
+        "east_profit": "logical:east_profit",
+        "south_sales": "logical:south_sales",
+        "south_profit": "logical:south_profit",
+        "top_products": "logical:top_products"
+      },
+      "realizes": [{ "logical_node": "report", "physical_result": "markdown" }]
+    },
+    {
+      "id": "p_send_email",
+      "kind": "ACT",
+      "resolver": "email_action",
+      "depends_on": ["p_report"],
+      "wave": 3,
+      "call": {
+        "action": "EMAIL.SEND",
+        "recipient": "颜斌",
+        "content": "logical:report"
+      },
+      "idempotency": { "scope": "run+logical_node+payload" },
+      "realizes": [{ "logical_node": "send_email", "physical_result": "receipt" }]
+    }
+  ]
+}
+```
+
+PEP 允许进一步共享 `p_region_metrics` 和 `p_top_products` 的底层扫描，但只有成本模型判断共享物化比两条源查询更优时才采用；SQG 不发生任何变化。
+
+---
+
+## 12. 实施范围与验收
+
+### 12.1 Clean-break 改造范围
+
+后端：
+
+- 用 discriminated typed SQG models 替换 `SQGNode.params`；
+- 新增 typed Predicate/Expression/Statistic/Dimension/ResultContract；
+- 新增高层 CALCULATE；删除 SQG `FILTER/JOIN/PROJECT`；
+- Metric 改为 structured expression；
+- Relation 增加方向性 multiplicity、optionality、integrity、temporal；
+- Optimizer 新增 Bound Logical Plan 和 Fragment PEP；
+- 删除旧 `QuerySpec.value_expr/label_expr/selects`、P1/P2 正则融合和 PROJECT 拆分；
+- SQL Server 与 DuckDB 使用共享 typed IR、独立方言 Renderer；
+- Coordinator 使用 `realizes` 注册逻辑结果；
+- Generator 根据 explicit result schema 渲染。
+
+前端：
+
+- SQG 图只显示高层业务任务；
+- PEP 图显示 Fragment/Exchange 和融合映射；
+- 关系编辑器强制选择基数与可选性；
+- relation edge 显示 N:1、1:N、1:1、N:M 及可选状态；
+- 节点详情展示 typed spec/result contract/operator tree；
+- 五阶段运行时间线。
+
+数据：
+
+- 设计阶段不迁移旧 SQG、PEP、QuerySpec、缓存或历史运行 JSON；
+- 更新本体 graph version；现有开发本体按新 schema 重新生成或一次性转换；
+- 生产数据变更必须另行评审，不在兼容层中隐式处理。
+
+### 12.2 测试矩阵
+
+必须覆盖：
+
+1. 同 scope 多测度单扫描；
+2. 不同 scope 公共谓词提取 + 条件聚合；
+3. 不同 TopN 共享前缀后分支；
+4. 月/季/年 grain 与时区；
+5. median/percentile/variance；
+6. CALCULATE 对齐、广播、除零、最低/最高选择；
+7. many-to-one 安全预聚合；
+8. one-to-many/many-to-many fan-out 防护；
+9. optional relation 三种 unmatched policy；
+10. 跨源 fallback、预聚合、semi-join、全局 TopN；
+11. 一个物理 Fragment `realizes` 多个 SQG 节点；
+12. ASK 不重算、ACT 幂等；
+13. 权限域隔离、缓存失效、连接恢复；
+14. SQL Server 与 DuckDB 结果等价；
+15. Semantic Binding、Bound Logical Plan、PEP 三份 artifact 在成功、partial failure、缓存命中时均可保存和串联浏览；
+16. optimization trace 能说明规则应用/拒绝和候选成本；
+17. UI 关系必填校验和 SQG/IR/PEP 联动视图。
+
+### 12.3 验收判据
+
+- 用户从 SQG 图能直接复述系统的解题步骤；
+- SQG JSON 中没有 Resolver、物理对象或关系代数技术节点；
+- 每次 Optimizer 运行都能浏览 Semantic Binding、Bound Logical Plan、PEP 以及选择理由；
+- PEP 清楚展示执行位置、Exchange、融合和 logical output bindings；
+- 跨源计划不会因 JOIN fan-out 重复计算指标；
+- 未知 relation 基数时 Optimizer 自动退回保守策略；
+- 所有确定性数字均可从 typed plan 和 lineage 复算；
+- 新增统计函数或数据源主要扩展 typed IR/Capabilities/Renderer，不需要修改 Compiler 的业务粒度原则。
+
+### 12.4 当前验证基线
+
+- Backend：`python -m unittest discover -s test -p "test_*.py"`，29 tests；
+- Python：`python -m compileall -q app`；
+- Frontend：`npm run build`（含 `vue-tsc --build`）；
+- BFF：`dotnet build DataNexus.Server/DataNexus.Server.csproj -c Release`。
+
+当前实现没有执行任何 DDL，也没有修改生产或开发数据库数据。本体 graph v3 仍存放于原 `nexus.ontology.graph` JSON 列；运行 artifacts 仍存放于原 `nexus.run_stage.logs`。
+
+旧本体的一次性转换入口位于：**本体管理 → 打开旧本体 → 顶部黄色提示 →「转换为 graph v3」**。转换先在浏览器内生成草稿，不立即写库；用户必须逐条确认 relation 的基数/可选性/integrity，并审阅无法自动解析的 metric。只有点击“保存”后，才覆盖原 `nexus.ontology.graph` JSON；不修改数据库表结构。

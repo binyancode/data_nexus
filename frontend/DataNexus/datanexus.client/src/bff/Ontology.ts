@@ -22,6 +22,12 @@ export interface AttributeNode {
   enabled?: boolean          // 是否启用（停用则不进编译器/查询；默认启用）
   synonyms?: string[]
   semantics?: string | null
+  constraints?: {
+    nullable?: boolean | null
+    unique?: boolean
+    primary_key?: boolean
+    source?: string
+  }
 }
 
 export interface EntityNodeData {
@@ -31,7 +37,7 @@ export interface EntityNodeData {
   synonyms?: string[]
   resolver?: string
   table?: string | null
-  key?: string | null
+  key?: string | string[] | null
   attributes: AttributeNode[]
   layout?: { x: number; y: number }
 }
@@ -41,10 +47,20 @@ export interface RelationEdge {
   name: string
   semantics?: string | null
   synonyms?: string[]
-  from_entity: string
-  from_key: string
-  to_entity: string
-  to_key: string
+  from: { entity: string; attribute: string | string[] }
+  to: { entity: string; attribute: string | string[] }
+  multiplicity: {
+    from_to: { min: 0 | 1 | 'unknown'; max: 1 | 'many' | 'unknown' }
+    to_from: { min: 0 | 1 | 'unknown'; max: 1 | 'many' | 'unknown' }
+  }
+  integrity: {
+    mode: 'ENFORCED' | 'DECLARED' | 'INFERRED' | 'UNKNOWN'
+    source?: string | null
+    constraint_name?: string | null
+    confidence: number
+  }
+  temporal?: { fact_time: string; valid_from: string; valid_to: string } | null
+  confirmation?: { required: boolean; confirmed: boolean }
 }
 
 export interface MetricItem {
@@ -52,7 +68,9 @@ export interface MetricItem {
   name: string
   semantics?: string | null
   synonyms?: string[]
-  expr: string
+  expression: Record<string, any>
+  result_type?: string
+  unit?: string
 }
 
 export interface DerivationItem {
@@ -82,6 +100,7 @@ export interface AttachedResolver {
 }
 
 export interface OntologyGraph {
+  version: 3
   entities: EntityNodeData[]
   relations: RelationEdge[]
   metrics: MetricItem[]
@@ -107,7 +126,7 @@ export interface OntologyFull extends OntologyMeta {
 }
 
 export function emptyGraph(): OntologyGraph {
-  return { entities: [], relations: [], metrics: [], derivations: [], actions: [], resolvers: [] }
+  return { version: 3, entities: [], relations: [], metrics: [], derivations: [], actions: [], resolvers: [] }
 }
 
 export function listOntologies(): Promise<OntologyMeta[]> {

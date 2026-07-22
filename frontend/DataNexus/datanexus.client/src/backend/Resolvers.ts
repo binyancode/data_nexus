@@ -9,12 +9,15 @@ export interface ResolverInfo {
   type: string
   provides_concepts?: boolean
   operators?: string[]
+  relational?: Record<string, unknown>
 }
 
 export interface ColumnInfo {
   column: string
   type: string
   dtype?: string
+  nullable?: boolean | null
+  unique?: boolean
 }
 
 export interface SchemaInfo {
@@ -22,6 +25,7 @@ export interface SchemaInfo {
 }
 
 export interface ImportFragment {
+  version: 3
   entities: EntityNodeData[]
   relations: RelationEdge[]
 }

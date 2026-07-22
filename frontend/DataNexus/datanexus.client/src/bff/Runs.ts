@@ -16,6 +16,7 @@ export interface RunStage {
   state: string | null
   input: string | null   // JSON 字符串
   output: string | null  // JSON 字符串（optimizer 行 = plan JSON，画执行图用）
+  logs: string | null
   error: string | null
   cost_ms: number | null
   started_at: string | null
@@ -31,6 +32,7 @@ export interface RunNode {
   value: string | null
   source: string | null
   trust: number | null
+  logs: string | null
   error: string | null
   cost_ms: number | null
   started_at: string | null

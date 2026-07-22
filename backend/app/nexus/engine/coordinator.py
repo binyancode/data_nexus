@@ -1,94 +1,49 @@
-"""协调器：解释物理 DAG 并按依赖执行。
-
-职责：
-  1. 分波：优先用优化器算好的 node.wave；缺失则按 depends_on 拓扑分波兜底。
-  2. 波内并行：同波节点互不依赖，用线程池并发（parallelism 控并发度）。
-  3. 回填：执行下游前，用已完成节点的结果替换 call 里的 {nX} 占位符。
-  4. 失败隔离：单节点异常只标该节点 failed，依赖它的下游标 skipped，不炸整轮。
-  5. 边跑边记：每节点 running → done/failed 立刻写 run_node，供前端轮询上色。
-"""
+"""Execute a Fragment PEP and publish physical outputs as logical SQG results."""
 
 from __future__ import annotations
 
 import json
-import re
+import math
+from string import Formatter
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 
-from nexus.core.models import QueryPlan, PlanNode, NodeResult, ExecContext, Operator, QuerySpec, topo_waves
+from nexus.core.expressions import (
+    BinaryExpr, FunctionExpr, LiteralExpr, NodeOutputExpr, OutputExpr, UnaryExpr,
+)
+from nexus.core.logical import CalculateSpec, InputRef
+from nexus.core.models import ExecContext, NodeResult, topo_waves
+from nexus.core.physical import (
+    CapabilityFragment, ComputeFragment, ExchangeFragment, PhysicalExecutionPlan,
+    SourceFragment,
+)
 from nexus.registry import ResolverRegistry
 
-_PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
-
-def _dumps(obj) -> str:
-    return json.dumps(obj, ensure_ascii=False, default=str)
-
-
-def _result_value(res: NodeResult):
-    """节点的代表值：首行的 value 列（或首个值）；无行则取 output。仅用于「短预览」。"""
-    if res is None:
-        return None
-    if res.rows:
-        first = res.rows[0]
-        return first.get("value", next(iter(first.values()), None))
-    return res.output
-
-
-_MAX_BACKFILL_ROWS = 200
-_MAX_BACKFILL_CHARS = 100000
-
-
-def _cell(v) -> str:
-    return "" if v is None else str(v)
-
-
-def _render_result(res: NodeResult) -> str:
-    """把一个节点结果**完整**渲染成给下游 prompt 用的文本（供 {nX} 回填）：
-    - 无行 → output 文本；
-    - 单行单列 → 标量值；
-    - 多行 → 逐行序列化（label: value / value / k=v），别只给第一行。
-    行数过多时截断，避免撑爆提示词。"""
-    if res is None:
-        return ""
-    rows = res.rows or []
-    if not rows:
-        return "" if res.output is None else str(res.output)
-    if len(rows) == 1 and len(rows[0]) == 1:
-        return _cell(next(iter(rows[0].values())))
-
-    def fmt_row(r: dict) -> str:
-        if "label" in r and "value" in r:
-            return f"{r.get('label')}: {_cell(r.get('value'))}"
-        if set(r.keys()) == {"value"}:
-            return _cell(r.get("value"))
-        return ", ".join(f"{k}={_cell(v)}" for k, v in r.items())
-
-    shown = rows[:_MAX_BACKFILL_ROWS]
-    body = "；".join(fmt_row(r) for r in shown)
-    if len(rows) > len(shown):
-        body += f"；…（共 {len(rows)} 行，仅列出前 {len(shown)} 行）"
-    if len(body) > _MAX_BACKFILL_CHARS:
-        body = body[:_MAX_BACKFILL_CHARS] + "…（内容过长，已截断）"
-    return body
+def _dumps(value) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 class Coordinator:
     def __init__(self, registry: ResolverRegistry):
         self.registry = registry
 
-    def execute(self, plan: QueryPlan, ctx: ExecContext) -> dict[str, NodeResult]:
+    def execute(self, plan: PhysicalExecutionPlan, ctx: ExecContext) -> dict[str, NodeResult]:
         ctx.context = plan.context or {}
+        ctx.physical_results = {}
         parallelism = int(ctx.context.get("parallelism", 4) or 4)
-        # 跨源计算：若计划含 compute 节点，每运行建一个内存计算引擎
-        if any(getattr(n, "resolver", "") == "(compute)" for n in plan.nodes):
+        needs_compute = any(isinstance(node, (ComputeFragment, ExchangeFragment))
+                            or (isinstance(node, CapabilityFragment) and node.resolver == "(compute)")
+                            for node in plan.nodes)
+        if needs_compute:
             from nexus.engine.compute import DuckDbCompute
             import threading
             ctx.compute = DuckDbCompute()
             ctx.compute.lock = threading.Lock()
         try:
-            for wave in self._waves(plan.nodes):
+            for wave in self._waves(plan):
                 if self._cancelled(ctx):
                     break
                 self._run_wave(wave, ctx, parallelism)
@@ -98,142 +53,318 @@ class Coordinator:
                 ctx.compute = None
         return ctx.results
 
-    # ── 分波 ──
-    def _waves(self, nodes: list[PlanNode]) -> list[list[PlanNode]]:
-        """优先用 node.wave；若有节点缺 wave 则退回拓扑分波。"""
-        if nodes and all(getattr(n, "wave", 0) >= 1 for n in nodes):
-            buckets: dict[int, list[PlanNode]] = {}
-            for n in nodes:
-                buckets.setdefault(n.wave, []).append(n)
-            return [buckets[w] for w in sorted(buckets)]
-        return topo_waves(nodes)
+    @staticmethod
+    def _waves(plan: PhysicalExecutionPlan):
+        if plan.nodes and all(node.wave >= 1 for node in plan.nodes):
+            buckets = {}
+            for node in plan.nodes:
+                buckets.setdefault(node.wave, []).append(node)
+            return [buckets[index] for index in sorted(buckets)]
+        return topo_waves(plan.nodes)
 
-    def _run_wave(self, nodes: list[PlanNode], ctx: ExecContext, parallelism: int) -> None:
+    def _run_wave(self, nodes, ctx, parallelism):
         if len(nodes) == 1:
             self._run_node(nodes[0], ctx)
             return
-        with ThreadPoolExecutor(max_workers=min(parallelism, len(nodes))) as ex:
-            list(ex.map(lambda n: self._run_node(n, ctx), nodes))
+        with ThreadPoolExecutor(max_workers=min(parallelism, len(nodes))) as executor:
+            list(executor.map(lambda node: self._run_node(node, ctx), nodes))
 
-    # ── 单节点执行（回填 + 取数 + 记录）──
-    def _run_node(self, node: PlanNode, ctx: ExecContext) -> None:
-        t0 = time.time()
-        call = self._backfill(node.call, ctx.results)
-        ctx.recorder.start_node(ctx.run_id, node.id, node.resolver, _dumps(call))
-
-        # 上游失败则跳过（失败隔离）
+    def _run_node(self, node, ctx: ExecContext):
+        started = time.time()
+        resolver_name = self._resolver_name(node)
+        call = self._call(node)
+        ctx.recorder.start_node(ctx.run_id, node.id, resolver_name, _dumps(call))
         if self._upstream_failed(node, ctx):
-            res = NodeResult(node_id=node.id, resolver=node.resolver,
-                             error="skipped: upstream failed", source="")
-            ctx.results[node.id] = res
-            ctx.recorder.finish_node(ctx.run_id, node.id, "skipped", _dumps(call),
-                                     None, None, "", res.trust, res.error,
-                                     int((time.time() - t0) * 1000))
-            return
-
-        resolver = self.registry.resolver(node.resolver)
-        if isinstance(call, dict) and call.get("error"):
-            # 优化器已判定无法规划（如缺少关系）：直接标失败，不去找 resolver
-            res = NodeResult(node_id=node.id, resolver=node.resolver, error=str(call["error"]))
-        elif node.resolver == "(compute)":
-            res = self._compute(node, call, ctx)          # 跨源：内存计算引擎执行 JOIN / 聚合
-        elif node.operator == Operator.PROJECT:
-            res = self._project(node, call, ctx)          # 融合拆分：从合并节点取一列，不调 resolver
-        elif not resolver:
-            res = NodeResult(node_id=node.id, resolver=node.resolver,
-                             error=f"resolver not found: {node.resolver}")
+            result = NodeResult(node_id=node.id, resolver=resolver_name,
+                                error="skipped: upstream failed")
+            state = "skipped"
         else:
             try:
-                res = resolver.fetch(call, ctx)
+                result = self._execute_node(node, call, ctx)
             except Exception:
-                res = NodeResult(node_id=node.id, resolver=node.resolver,
-                                 error=traceback.format_exc())
-
-        ctx.results[node.id] = res
-        state = "failed" if res.error else "done"
-        value = _result_value(res)
-        # 自定义日志：取数类节点额外记 resolver 返回的行数
-        node_logs = dict(res.logs) if res.logs else {}
-        n_rows = len(res.rows) if isinstance(res.rows, list) else 0
-        if node.operator not in (Operator.ASK, Operator.ACT) and isinstance(res.rows, list):
-            node_logs["row_count"] = n_rows
-        # 值预览：多行结果标注总条数，避免只显示第一行让人误以为只有一条
-        preview = None if value is None else str(value)[:200]
-        if preview is not None and n_rows > 1:
-            preview = f"{str(value)[:160]} 等 {n_rows} 项"
+                result = NodeResult(node_id=node.id, resolver=resolver_name,
+                                    error=traceback.format_exc())
+            state = "failed" if result.error else "done"
+        ctx.physical_results[node.id] = result
+        self._publish(node, result, ctx)
+        logs = dict(result.logs or {})
+        logs["row_count"] = len(result.rows or [])
+        preview = self._preview(result)
         ctx.recorder.finish_node(
-            ctx.run_id, node.id, state, _dumps(call),
-            _dumps(res.rows), preview,
-            res.source, res.trust, res.error, int((time.time() - t0) * 1000),
-            (_dumps(node_logs) if node_logs else None),
+            ctx.run_id, node.id, state, _dumps(call), _dumps(result.rows), preview,
+            result.source, result.trust, result.error,
+            int((time.time() - started) * 1000), _dumps(logs),
         )
 
-    # ── 跨源：内存计算引擎执行 JOIN / 聚合（load 上游 fetch 结果 → run QuerySpec）──
-    def _compute(self, node: PlanNode, call: dict, ctx: ExecContext) -> NodeResult:
-        eng = ctx.compute
-        if eng is None:
-            return NodeResult(node_id=node.id, resolver="(compute)", error="compute engine 未初始化")
-        try:
-            with eng.lock:
-                for ld in call.get("loads", []) or []:
-                    src = ctx.results.get(ld.get("from_node"))
-                    eng.load(ld["table"], (src.rows if src and src.rows else []))
-                spec = QuerySpec(**call["spec"])
-                rows = eng.run(spec, into=call.get("into"))
-        except Exception:
-            return NodeResult(node_id=node.id, resolver="(compute)",
-                              error=traceback.format_exc(), source="compute")
-        cols = list(rows[0].keys()) if rows else []
+    def _execute_node(self, node, call, ctx):
+        if isinstance(node, SourceFragment):
+            resolver = self.registry.resolver(node.source_instance)
+            if resolver is None:
+                return NodeResult(node_id=node.id, error=f"resolver not found: {node.source_instance}")
+            return resolver.fetch(call, ctx)
+        if isinstance(node, ComputeFragment):
+            return self._compute(node, ctx)
+        if isinstance(node, ExchangeFragment):
+            source = ctx.physical_results.get(node.from_fragment)
+            if source is None:
+                return NodeResult(node_id=node.id, error=f"exchange source missing: {node.from_fragment}")
+            return NodeResult(node_id=node.id, resolver="(exchange)", rows=list(source.rows),
+                              columns=list(source.columns), output=source.output,
+                              source=source.source, detail=node.mode)
+        if isinstance(node, CapabilityFragment):
+            if node.resolver == "(compute)":
+                return self._calculate(node, ctx)
+            enriched = self._capability_call(node, call, ctx)
+            call.clear()
+            call.update(enriched)
+            resolver = self.registry.resolver(node.resolver)
+            if resolver is None:
+                return NodeResult(node_id=node.id, error=f"resolver not found: {node.resolver}")
+            return resolver.fetch(enriched, ctx)
+        return NodeResult(node_id=node.id, error=f"unsupported plan node: {type(node).__name__}")
+
+    def _compute(self, node: ComputeFragment, ctx: ExecContext):
+        engine = ctx.compute
+        if engine is None:
+            return NodeResult(node_id=node.id, resolver="(compute)", error="compute engine unavailable")
+        with engine.lock:
+            for item in node.inputs:
+                source = ctx.physical_results.get(item.from_fragment)
+                engine.load(item.table, list(source.rows) if source else [])
+            rows = engine.run(node.query, into=node.into)
         return NodeResult(node_id=node.id, resolver="(compute)", output=rows,
-                          columns=cols, rows=rows, source="compute",
-                          detail=call.get("into") or "join/aggregate")
+                          rows=rows, columns=list(rows[0]) if rows else [],
+                          source="compute:duckdb", detail="typed QueryIR")
 
-    # ── 融合拆分：从合并节点结果里取一列，产出与单聚合等价的 NodeResult ──
-    def _project(self, node: PlanNode, call: dict, ctx: ExecContext) -> NodeResult:
-        src = ctx.results.get(call.get("from"))
-        col = call.get("column")
-        if src is None:
-            return NodeResult(node_id=node.id, resolver="(merge)",
-                              error=f"merge source not found: {call.get('from')}")
-        rows = []
-        for r in (src.rows or []):
-            row = {}
-            if "label" in r:
-                row["label"] = r["label"]
-            row["value"] = r.get(col)
-            rows.append(row)
-        cols = ["label", "value"] if (rows and "label" in rows[0]) else ["value"]
-        return NodeResult(node_id=node.id, resolver="(merge)", output=rows,
-                          columns=cols, rows=rows, source=src.source,
-                          detail=f"从合并节点 {call.get('from')} 取列 {col}")
+    def _capability_call(self, node: CapabilityFragment, call: dict, ctx: ExecContext):
+        result = dict(call)
+        inputs = self._resolve_inputs(result.pop("input_refs", {}), ctx)
+        result = self._format_input_strings(result, inputs)
+        if inputs:
+            result["inputs"] = inputs
+            if node.operator.value == "ASK":
+                result["prompt"] = (result.get("prompt") or result.get("instruction") or "") + \
+                    "\n\n输入数据（只可解释和组织，不得修改或重新计算数值）：\n" + _dumps(inputs)
+            elif node.operator.value == "ACT":
+                result["desc"] = _dumps(inputs)
+        if result.get("recipient") and not result.get("assignee"):
+            result["assignee"] = result["recipient"]
+        return result
 
-    # ── 回填 {nX} ──
-    def _backfill(self, call, results: dict[str, NodeResult]):
-        if not isinstance(call, dict):
-            return call
+    def _resolve_inputs(self, references: dict, ctx: ExecContext) -> dict:
+        return {
+            name: self._resolve_input(InputRef.model_validate(raw), ctx)
+            for name, raw in references.items()
+        }
 
-        def sub(v):
-            if isinstance(v, str):
-                return _PLACEHOLDER.sub(
-                    lambda m: _render_result(results[m.group(1)])
-                    if m.group(1) in results else m.group(0),
-                    v,
+    @staticmethod
+    def _resolve_input(reference: InputRef, ctx: ExecContext):
+        source = ctx.results.get(reference.node)
+        if source is None:
+            raise ValueError(f"input source result 不存在：{reference.node}")
+        rows = list(source.rows or [])
+        if reference.row is not None:
+            if reference.row >= len(rows):
+                raise ValueError(f"input row {reference.row} 不存在：{reference.node}")
+            selected = rows[reference.row]
+            if reference.output is None:
+                return selected
+            if reference.output not in selected:
+                raise ValueError(f"input output 不存在：{reference.node}.{reference.output}")
+            return selected[reference.output]
+        if reference.output is not None:
+            missing = [index for index, row in enumerate(rows) if reference.output not in row]
+            if missing:
+                raise ValueError(
+                    f"input output 不存在：{reference.node}.{reference.output}，rows={missing[:5]}"
                 )
-            if isinstance(v, list):
-                return [sub(x) for x in v]
-            if isinstance(v, dict):
-                return {k: sub(x) for k, x in v.items()}
-            return v
+            return [row[reference.output] for row in rows]
+        return rows if rows else source.output
 
-        return {k: sub(v) for k, v in call.items()}
+    def _format_input_strings(self, value, inputs: dict):
+        if isinstance(value, str):
+            try:
+                fields = {field_name for _, field_name, _, _ in Formatter().parse(value)
+                          if field_name}
+            except ValueError:
+                return value
+            if not fields:
+                return value
+            if not (fields & set(inputs)):
+                return value
+            unknown = fields - set(inputs)
+            if unknown:
+                raise ValueError(f"文本参数引用了未知 inputs：{sorted(unknown)}")
+            values = {}
+            for field in fields:
+                resolved = inputs[field]
+                if isinstance(resolved, (dict, list)) or resolved is None:
+                    raise ValueError(f"文本参数 input {field!r} 必须是非空标量")
+                values[field] = resolved
+            return value.format_map(values)
+        if isinstance(value, dict):
+            return {key: self._format_input_strings(child, inputs)
+                    for key, child in value.items()}
+        if isinstance(value, list):
+            return [self._format_input_strings(child, inputs) for child in value]
+        return value
 
-    def _upstream_failed(self, node: PlanNode, ctx: ExecContext) -> bool:
-        for dep in node.depends_on:
-            up = ctx.results.get(dep)
-            if up is not None and up.error:
-                return True
-        return False
+    def _calculate(self, node: CapabilityFragment, ctx: ExecContext):
+        spec = CalculateSpec.model_validate(node.call["spec"])
+        datasets = {
+            alias: list((ctx.results.get(input_ref.node) or NodeResult(node_id=input_ref.node)).rows)
+            for alias, raw in node.call.get("input_refs", {}).items()
+            for input_ref in [InputRef.model_validate(raw)]
+        }
+        rows = self._align(datasets, spec.alignment.keys, spec.alignment.domain,
+                           spec.alignment.scalar_broadcast)
+        calculated = []
+        for row in rows:
+            output = dict(row.get("_keys", {}))
+            values = dict(row.get("_outputs", {}))
+            for named in spec.outputs:
+                values[named.name] = self._eval(named.expression, row, values)
+                output[named.name] = values[named.name]
+            calculated.append(output)
+        if spec.selection:
+            reverse = spec.selection.kind in ("MAX_BY", "TOP_N")
+            calculated.sort(key=lambda value: self._sort_value(value.get(spec.selection.field), reverse), reverse=reverse)
+            calculated = calculated[:spec.selection.take]
+        return NodeResult(node_id=node.id, resolver="(compute)", output=calculated,
+                          rows=calculated, columns=list(calculated[0]) if calculated else [],
+                          source="compute:calculate", detail="typed CALCULATE")
 
-    def _cancelled(self, ctx: ExecContext) -> bool:
-        tok = ctx.cancellation_token
-        return bool(tok and getattr(tok, "is_cancelled", False))
+    @staticmethod
+    def _align(datasets, keys, domain, scalar_broadcast):
+        aliases = list(datasets)
+        if not aliases:
+            return []
+        if not keys:
+            return [{"_keys": {}, "_inputs": {
+                alias: (rows[0] if rows else {}) for alias, rows in datasets.items()
+            }, "_outputs": {}}]
+        indexes = {
+            alias: {tuple(row.get(key) for key in keys): row for row in rows}
+            for alias, rows in datasets.items()
+        }
+        key_sets = [set(index) for index in indexes.values()]
+        if domain == "INNER":
+            selected = set.intersection(*key_sets) if key_sets else set()
+        elif domain == "LEFT":
+            selected = key_sets[0]
+        else:
+            selected = set.union(*key_sets) if key_sets else set()
+        aligned = []
+        for key_tuple in sorted(selected, key=lambda value: tuple(str(v) for v in value)):
+            aligned.append({
+                "_keys": dict(zip(keys, key_tuple)),
+                "_inputs": {alias: index.get(key_tuple, {}) for alias, index in indexes.items()},
+                "_outputs": {},
+            })
+        return aligned
+
+    def _eval(self, expression, row, outputs):
+        if isinstance(expression, LiteralExpr):
+            return expression.value
+        if isinstance(expression, NodeOutputExpr):
+            return row.get("_inputs", {}).get(expression.input, {}).get(expression.field)
+        if isinstance(expression, OutputExpr):
+            return outputs.get(expression.name)
+        if isinstance(expression, UnaryExpr):
+            value = self._eval(expression.operand, row, outputs)
+            return -value if value is not None else None
+        if isinstance(expression, BinaryExpr):
+            left = self._eval(expression.left, row, outputs)
+            right = self._eval(expression.right, row, outputs)
+            if left is None or right is None:
+                return None
+            if expression.operator == "ADD": return left + right
+            if expression.operator == "SUBTRACT": return left - right
+            if expression.operator == "MULTIPLY": return left * right
+            if expression.operator in ("DIVIDE", "SAFE_DIVIDE"):
+                if right == 0:
+                    if expression.zero_division == "ZERO": return 0
+                    if expression.zero_division == "ERROR": raise ZeroDivisionError()
+                    return None
+                return left / right
+        if isinstance(expression, FunctionExpr):
+            values = [self._eval(arg, row, outputs) for arg in expression.arguments]
+            if expression.name == "COALESCE": return next((v for v in values if v is not None), None)
+            if expression.name == "ABS": return abs(values[0])
+            if expression.name == "ROUND": return round(values[0], int(values[1]) if len(values) > 1 else 0)
+        raise ValueError(f"unsupported calculate expression: {type(expression).__name__}")
+
+    def _publish(self, node, result: NodeResult, ctx: ExecContext):
+        for binding in node.realizes:
+            rows = list(result.rows or [])
+            if binding.physical_field:
+                query = getattr(node, "query", None)
+                dimension_names = [value.name for value in query.dimensions] if query is not None else []
+                rows = [
+                    {**{k: row.get(k) for k in dimension_names},
+                     binding.logical_field or "value": row.get(binding.physical_field)}
+                    for row in rows
+                ]
+            logical = NodeResult(
+                node_id=binding.logical_node, resolver=result.resolver,
+                output=rows if rows else result.output,
+                rows=rows, columns=list(rows[0]) if rows else [], trust=result.trust,
+                error=result.error, source=result.source, detail=result.detail,
+                logs=dict(result.logs or {}),
+            )
+            ctx.results[binding.logical_node] = logical
+
+    @staticmethod
+    def _result_payload(result: NodeResult | None):
+        if result is None:
+            return None
+        if result.rows:
+            return result.rows
+        return result.output
+
+    @staticmethod
+    def _sort_value(value, reverse):
+        if value is None:
+            return -math.inf if reverse else math.inf
+        if isinstance(value, Decimal):
+            return float(value)
+        return value
+
+    @staticmethod
+    def _preview(result: NodeResult):
+        if result.rows:
+            suffix = f" 等 {len(result.rows)} 项" if len(result.rows) > 1 else ""
+            suffix_units = len(suffix.encode("utf-16-le")) // 2
+            return Coordinator._truncate_utf16(_dumps(result.rows[0]), 200 - suffix_units) + suffix
+        return Coordinator._truncate_utf16(str(result.output), 200) if result.output is not None else None
+
+    @staticmethod
+    def _truncate_utf16(value: str, max_units: int) -> str:
+        encoded = value.encode("utf-16-le")
+        if len(encoded) <= max_units * 2:
+            return value
+        return encoded[:max_units * 2].decode("utf-16-le", errors="ignore")
+
+    @staticmethod
+    def _resolver_name(node):
+        if isinstance(node, SourceFragment): return node.source_instance
+        if isinstance(node, ComputeFragment): return "(compute)"
+        if isinstance(node, ExchangeFragment): return "(exchange)"
+        return node.resolver
+
+    @staticmethod
+    def _call(node):
+        if isinstance(node, SourceFragment): return node.call
+        if isinstance(node, ComputeFragment): return {"query": node.query.model_dump(mode="json"), "inputs": [i.model_dump() for i in node.inputs]}
+        if isinstance(node, ExchangeFragment): return node.model_dump(mode="json")
+        return node.call
+
+    @staticmethod
+    def _upstream_failed(node, ctx):
+        return any((ctx.physical_results.get(dep) and ctx.physical_results[dep].error)
+                   for dep in node.depends_on)
+
+    @staticmethod
+    def _cancelled(ctx):
+        token = ctx.cancellation_token
+        return bool(token and getattr(token, "is_cancelled", False))

@@ -37,13 +37,20 @@ TABLES = ["dbo.dim_region", "dbo.dim_product", "dbo.dim_customer", "dbo.fact_ord
 
 METRICS = [
     {"id": "metric.sales_amount", "name": "销售额", "synonyms": ["销售额", "营收", "sales"],
-     "semantics": "区域/期间的销售金额", "expr": "SUM(attribute.fact_sales.amount)"},
+     "semantics": "区域/期间的销售金额", "unit": "CNY", "result_type": "decimal",
+     "expression": {"kind": "aggregate", "function": "SUM",
+                    "value": {"kind": "attribute", "concept": "attribute.fact_sales.amount"}}},
     {"id": "metric.gross_margin", "name": "毛利", "synonyms": ["毛利额", "gross margin"],
      "semantics": "销售额扣成本后的毛利",
-     "expr": "SUM(attribute.fact_sales.amount - attribute.fact_sales.cost)"},
+     "unit": "CNY", "result_type": "decimal",
+     "expression": {"kind": "aggregate", "function": "SUM", "value": {
+         "kind": "binary", "operator": "SUBTRACT",
+         "left": {"kind": "attribute", "concept": "attribute.fact_sales.amount"},
+         "right": {"kind": "attribute", "concept": "attribute.fact_sales.cost"}}}},
     {"id": "metric.order_quantity", "name": "订单数量", "synonyms": ["订单量", "下单数量", "数量", "order quantity", "qty"],
      "semantics": "订单明细的数量合计（可按产品/区域/客户分组排名）",
-     "expr": "SUM(attribute.fact_order.quantity)"},
+     "result_type": "decimal", "expression": {"kind": "aggregate", "function": "SUM",
+                                                "value": {"kind": "attribute", "concept": "attribute.fact_order.quantity"}}},
 ]
 
 
@@ -54,12 +61,16 @@ def main():
         raise SystemExit("dwh resolver 未注册，请先跑 seed_p0.py")
 
     frag = build_fragment("dwh", r.describe(), r.primary_keys(), r.foreign_keys(), TABLES)
+    for relation in frag["relations"]:
+        relation["confirmation"] = {"required": False, "confirmed": True}
     graph = {
+        "version": 3,
         "entities": frag["entities"],
         "relations": frag["relations"],
         "metrics": METRICS,
         "derivations": [],
         "actions": [],
+        "resolvers": [{"name": "dwh", "type": "sql"}],
     }
 
     db.execute_non_query(

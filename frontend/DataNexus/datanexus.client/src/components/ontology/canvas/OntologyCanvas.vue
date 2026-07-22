@@ -57,7 +57,7 @@ const nodes = computed(() =>
       isFact: /fact/i.test(en.table || en.name || ''),
       attributes: en.attributes.map((a) => ({
         id: a.id, name: a.name, role: a.role,
-        isKey: !!en.key && a.column === en.key,
+        isKey: (Array.isArray(en.key) ? en.key : en.key ? [en.key] : []).includes(a.column || a.name),
       })),
     },
   })),
@@ -66,12 +66,12 @@ const nodes = computed(() =>
 const edges = computed(() =>
   props.graph.relations.map((r) => ({
     id: r.id,
-    source: r.from_entity,
-    target: r.to_entity,
-    label: `${r.from_key} = ${r.to_key}`,
+    source: r.from.entity,
+    target: r.to.entity,
+    label: relationLabel(r),
     type: 'smoothstep',
     animated: false,
-    style: { stroke: '#b6c5d8', strokeWidth: 1.8 },
+    style: { stroke: r.confirmation?.required && !r.confirmation.confirmed ? '#d08a2f' : '#b6c5d8', strokeWidth: 1.8 },
     labelStyle: { fill: '#52657a', fontSize: '11px', fontWeight: 600 },
     labelShowBg: true,
     labelBgStyle: { fill: '#ffffff', stroke: '#e4e9ef' },
@@ -79,6 +79,19 @@ const edges = computed(() =>
     labelBgBorderRadius: 6,
   })),
 )
+
+function endpointNames(entityId: string, value: string | string[]) {
+  const entity = props.graph.entities.find((item) => item.id === entityId)
+  const ids = Array.isArray(value) ? value : [value]
+  return ids.map((id) => entity?.attributes.find((attribute) => attribute.id === id)?.column || id).join(', ')
+}
+function relationLabel(r: any) {
+  const left = r.multiplicity?.to_from?.max === 1 ? '1' : r.multiplicity?.to_from?.max === 'many' ? 'N' : '?'
+  const right = r.multiplicity?.from_to?.max === 1 ? '1' : r.multiplicity?.from_to?.max === 'many' ? 'N' : '?'
+  const optional = `${r.multiplicity?.from_to?.min === 1 ? '必选' : r.multiplicity?.from_to?.min === 0 ? '可选' : '未知'} / ${r.multiplicity?.to_from?.min === 1 ? '必选' : r.multiplicity?.to_from?.min === 0 ? '可选' : '未知'}`
+  const pending = r.confirmation?.required && !r.confirmation.confirmed ? ' · 待确认' : ''
+  return `${endpointNames(r.from.entity, r.from.attribute)} = ${endpointNames(r.to.entity, r.to.attribute)} · ${left}:${right} · ${optional}${pending}`
+}
 
 function onDragStop(e: NodeMouseEvent) {
   const n = e.node

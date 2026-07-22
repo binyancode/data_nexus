@@ -8,8 +8,10 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from services.sql_db import sql_db
-from nexus.core.models import NodeResult, ExecContext, QuerySpec
+from nexus.core.models import NodeResult, ExecContext
+from nexus.core.physical import QueryIR
 from nexus.resolvers.base import Resolver
+from nexus.resolvers.query_renderer import SqlServerRenderer
 
 
 # 原生 DB 类型 → 粗粒度语义类型（concept 是语义层，不绑死某库的类型表）
@@ -37,7 +39,7 @@ class SqlResolver(Resolver):
 
     resolver_type = "sql"
     provides_concepts = True
-    operators = {"SELECT", "FILTER", "AGGREGATE", "JOIN"}
+    operators = {"SELECT", "AGGREGATE"}
 
     placeholder = "?"          # 参数占位符（pyodbc = ?）
 
@@ -50,87 +52,20 @@ class SqlResolver(Resolver):
     def _source(self) -> str:
         return f"{self.name}:{self.config.get('database', '')}"
 
-    # ── QuerySpec → SQL 渲染（优化器只给方言中立的 spec，语法在这里落地）──
-    def _limit_clause(self, spec: QuerySpec) -> tuple[str, str]:
-        """TopN 语法：返回 (SELECT 前缀, 末尾后缀)。
-        SQL Server 用 `SELECT TOP (n)`；用 LIMIT 的库覆写成 ('', ' LIMIT n')。"""
-        if spec.limit and spec.label_expr:
-            return f"TOP ({int(spec.limit)}) ", ""
-        return "", ""
+    def compile(self, query: QueryIR) -> dict:
+        rendered = SqlServerRenderer().render(query)
+        return {"sql": rendered.sql, "params": rendered.params}
 
-    def _cond(self, f, params: list) -> str:
-        """一条过滤渲染成条件串（用于 WHERE 或 CASE WHEN），把值追加进 params。"""
-        if f.op == "IN":
-            vals = f.value if isinstance(f.value, list) else [f.value]
-            params.extend(vals)
-            return f"{f.col} IN ({','.join([self.placeholder] * len(vals))})"
-        # 日期过滤：value_format 存在时显式转 date（ISO 值 TRY_CONVERT 可靠推断）
-        rhs = f"TRY_CONVERT(date, {self.placeholder})" if f.value_format else self.placeholder
-        params.append(f.value)
-        return f"{f.col} {f.op} {rhs}"
-
-    def compile(self, spec: QuerySpec) -> dict:
-        """QuerySpec → {sql, params}。"""
-        # FROM / JOIN
-        if spec.from_alias:
-            from_sql = f"{spec.from_table} {spec.from_alias}"
-            for j in spec.joins:
-                from_sql += f" JOIN {j.table} {j.alias} ON {j.on_left} = {j.on_right}"
-        else:
-            from_sql = spec.from_table
-
-        # 多测度融合：一条查询出多列（无 TopN/HAVING，融合时已排除）
-        # 参数顺序：SELECT 列表里的 CASE 参数在前，WHERE 参数在后（与 SQL 从左到右一致）
-        if spec.selects:
-            sel_params: list = []
-            cols = []
-            for s in spec.selects:
-                if s.filters:               # P2 条件聚合：agg(CASE WHEN 各自过滤 THEN inner END)
-                    conds = " AND ".join(self._cond(f, sel_params) for f in s.filters)
-                    cols.append(f"{s.agg}(CASE WHEN {conds} THEN {s.inner} END) AS {s.alias}")
-                else:                       # P1 多测度：直接聚合表达式
-                    cols.append(f"{s.expr} AS {s.alias}")
-            where_params: list = []
-            where = [self._cond(f, where_params) for f in spec.filters]
-            head = (f"{spec.label_expr} AS label, " if spec.label_expr else "") + ", ".join(cols)
-            sql = f"SELECT {head} FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            if spec.label_expr:
-                sql += f" GROUP BY {spec.label_expr}"
-            return {"sql": sql, "params": sel_params + where_params}
-
-        # 单测度路径
-        params: list = []
-        where = [self._cond(f, params) for f in spec.filters]
-        top, tail = self._limit_clause(spec)
-
-        if spec.label_expr and not spec.value_expr:
-            # 纯列举维度（去重）：SELECT DISTINCT 维度
-            sql = f"SELECT DISTINCT {top}{spec.label_expr} AS value FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            sql += f" ORDER BY value {spec.order}"
-            sql += tail
-        elif spec.label_expr:
-            sql = f"SELECT {top}{spec.label_expr} AS label, {spec.value_expr} AS value FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            sql += f" GROUP BY {spec.label_expr}"
-            if spec.having:
-                sql += f" HAVING {spec.value_expr} {spec.having.op} {self.placeholder}"
-                params.append(spec.having.value)
-            sql += f" ORDER BY value {spec.order}"
-            sql += tail
-        else:
-            sql = f"SELECT {spec.value_expr} AS value FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            if spec.having:
-                sql += f" HAVING {spec.value_expr} {spec.having.op} {self.placeholder}"
-                params.append(spec.having.value)
-
-        return {"sql": sql, "params": params}
+    def capabilities(self) -> dict:
+        base = super().capabilities()
+        base["relational"] = {
+            "filter": ["EQ", "NE", "GT", "GTE", "LT", "LTE", "IN", "BETWEEN", "LIKE"],
+            "join": ["INNER", "LEFT"],
+            "aggregates": ["SUM", "COUNT", "COUNT_DISTINCT", "AVG", "MIN", "MAX", "VARIANCE", "STDDEV"],
+            "time_grains": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"],
+            "conditional_aggregate": True, "top_n": True,
+        }
+        return base
 
     def fetch(self, call: dict, ctx: Optional[ExecContext] = None) -> NodeResult:
         node_id = call.get("node_id", "")
@@ -161,9 +96,22 @@ class SqlResolver(Resolver):
     def describe(self) -> dict:
         """探测：返回 {schema.table: [{column, type, dtype}]}。dtype 为粗粒度语义类型。"""
         rows = self._db.execute_query(
-            """SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
-               FROM INFORMATION_SCHEMA.COLUMNS
-               ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION"""
+                """SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE,
+                                    CASE WHEN EXISTS (
+                                            SELECT 1
+                                                FROM sys.indexes i
+                                                JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
+                                                JOIN sys.columns sc ON sc.object_id=ic.object_id AND sc.column_id=ic.column_id
+                                                JOIN sys.tables st ON st.object_id=i.object_id
+                                                JOIN sys.schemas ss ON ss.schema_id=st.schema_id
+                                                WHERE i.is_unique=1 AND ss.name=c.TABLE_SCHEMA AND st.name=c.TABLE_NAME
+                                                    AND sc.name=c.COLUMN_NAME
+                                                         AND (SELECT COUNT(*) FROM sys.index_columns ic2
+                                                                     WHERE ic2.object_id=i.object_id AND ic2.index_id=i.index_id
+                                                                         AND ic2.key_ordinal > 0) = 1
+                                    ) THEN 1 ELSE 0 END AS IS_UNIQUE
+                            FROM INFORMATION_SCHEMA.COLUMNS c
+                        ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION"""
         )
         tables: dict[str, list] = {}
         for r in rows:
@@ -171,6 +119,8 @@ class SqlResolver(Resolver):
             tables.setdefault(key, []).append({
                 "column": r["COLUMN_NAME"], "type": r["DATA_TYPE"],
                 "dtype": _coarse_type(r["DATA_TYPE"]),
+                "nullable": str(r.get("IS_NULLABLE") or "").upper() == "YES",
+                "unique": bool(r.get("IS_UNIQUE")),
             })
         return tables
 
@@ -194,7 +144,8 @@ class SqlResolver(Resolver):
     def foreign_keys(self) -> list:
         """返回外键 [{from_table, from_col, to_table, to_col}]（table 为 schema.table）。"""
         rows = self._db.execute_query(
-            """SELECT sp.name AS from_sch, tp.name AS from_tbl, cp.name AS from_col,
+            """SELECT fk.name AS constraint_name,
+                      sp.name AS from_sch, tp.name AS from_tbl, cp.name AS from_col,
                       sr.name AS to_sch,  tr.name AS to_tbl,  cr.name AS to_col
                  FROM sys.foreign_keys fk
                  JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id=fk.object_id
@@ -205,11 +156,17 @@ class SqlResolver(Resolver):
                  JOIN sys.schemas sr ON sr.schema_id=tr.schema_id
                  JOIN sys.columns cr ON cr.object_id=tr.object_id AND cr.column_id=fkc.referenced_column_id"""
         )
-        return [
-            {"from_table": f"{r['from_sch']}.{r['from_tbl']}", "from_col": r["from_col"],
-             "to_table": f"{r['to_sch']}.{r['to_tbl']}", "to_col": r["to_col"]}
-            for r in rows
-        ]
+        grouped: dict[tuple, dict] = {}
+        for row in rows:
+            key = (row["constraint_name"], row["from_sch"], row["from_tbl"], row["to_sch"], row["to_tbl"])
+            item = grouped.setdefault(key, {
+                "constraint_name": row["constraint_name"],
+                "from_table": f"{row['from_sch']}.{row['from_tbl']}", "from_cols": [],
+                "to_table": f"{row['to_sch']}.{row['to_tbl']}", "to_cols": [],
+            })
+            item["from_cols"].append(row["from_col"])
+            item["to_cols"].append(row["to_col"])
+        return list(grouped.values())
 
     def sample(self, target: str = None, n: int = 5) -> list[dict[str, Any]]:
         if not target:

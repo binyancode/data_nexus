@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from nexus.core.relations import RelationContract
+
 
 def ontology_resolver_names(graph: dict) -> set[str]:
     """本体使用的 resolver 名集合。
@@ -32,6 +34,32 @@ def validate_ontology(onto, registry=None) -> list[str]:
     """预检查本体，返回问题列表（空 = 通过）。"""
     problems: list[str] = []
     graph = getattr(onto, "graph", None) or {}
+
+    if graph.get("version") != 3:
+        problems.append("本体 graph.version 必须为 3；请按新版关系与指标模型重新保存本体。")
+
+    entities = {e.get("id"): e for e in graph.get("entities", []) or [] if e.get("id")}
+    attributes = {
+        a.get("id"): (entity_id, a)
+        for entity_id, entity in entities.items()
+        for a in (entity.get("attributes", []) or [])
+        if a.get("id")
+    }
+    for raw in graph.get("relations", []) or []:
+        try:
+            relation = RelationContract.model_validate(raw)
+        except Exception as exc:
+            problems.append(f"关系 {raw.get('name') or raw.get('id') or '未命名'} 定义不完整：{exc}")
+            continue
+        for end_name, end in (("from", relation.from_), ("to", relation.to)):
+            if end.entity not in entities:
+                problems.append(f"关系 {relation.name} 的 {end_name} 实体不存在：{end.entity}")
+            for attribute in end.attributes:
+                owner = attributes.get(attribute)
+                if owner is None or owner[0] != end.entity:
+                    problems.append(f"关系 {relation.name} 的 {end_name} 属性不属于该实体：{attribute}")
+        if relation.integrity.mode == "ENFORCED" and not relation.integrity.constraint_name:
+            problems.append(f"关系 {relation.name} 标记为 ENFORCED，但没有约束名称。")
 
     # 规则 1：必须至少有一个 resolver（数据源 / 能力源）
     names = ontology_resolver_names(graph)

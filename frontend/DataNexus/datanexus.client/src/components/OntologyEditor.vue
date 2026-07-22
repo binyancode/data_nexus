@@ -23,6 +23,16 @@
     </div>
     <div class="oe-desc ro" v-else-if="description">{{ description }}</div>
 
+    <div v-if="legacyGraph" class="migration-banner">
+      <div><b>此本体使用旧 graph 结构</b><span>可在这里执行一次性内存转换；确认并保存后才会写回原 graph JSON，不涉及数据库表结构。</span></div>
+      <el-button type="primary" :disabled="!meta?.canEdit" @click="startMigration">转换为 graph v3</el-button>
+    </div>
+
+    <div v-if="migrationIssues.length" class="migration-review">
+      <b>转换审阅（{{ migrationIssues.length }} 项）</b>
+      <span v-for="issue in migrationIssues" :key="`${issue.kind}:${issue.id}`">{{ issue.kind }} · {{ issue.id }}：{{ issue.message }}</span>
+    </div>
+
     <!-- 主体：画板 + 侧栏 -->
     <div class="oe-body" v-loading="loading" element-loading-text="加载本体…">
       <div class="oe-canvas">
@@ -48,7 +58,8 @@
           <div class="fld"><label>语义</label><el-input v-model="selEntity.semantics" type="textarea" :rows="2" :disabled="!meta?.canEdit" /></div>
           <div class="fld"><label>物理表</label><el-input :model-value="selEntity.table || ''" disabled size="small" class="mono" /></div>
           <div class="fld"><label>主键</label>
-            <el-select v-model="selEntity.key" size="small" :disabled="!meta?.canEdit" style="width:100%">
+            <el-select :model-value="entityKeys(selEntity)" multiple size="small" :disabled="!meta?.canEdit" style="width:100%"
+                       @update:model-value="(value:any) => selEntity!.key = value">
               <el-option v-for="a in selEntity.attributes" :key="a.id" :value="a.column || a.name" :label="a.column || a.name" />
             </el-select>
           </div>
@@ -157,40 +168,8 @@
       </aside>
     </div>
 
-    <!-- 关系对话框 -->
-    <el-dialog v-model="relDlg" :title="relEditing ? '编辑关系' : '新建关系'" width="460px" class="rel-dialog">
-      <div v-if="relForm" class="rel-dlg">
-        <div class="rd-card">
-          <div class="rd-tag">从</div>
-          <div class="rd-ent">{{ entName(relForm.from_entity) }}</div>
-          <el-select v-model="relForm.from_key" placeholder="选择关联键" class="rd-sel">
-            <el-option v-for="c in entCols(relForm.from_entity)" :key="c" :value="c" :label="c" />
-          </el-select>
-        </div>
-
-        <div class="rd-join">
-          <span class="rd-line"></span>
-          <span class="rd-badge">＝</span>
-          <span class="rd-line"></span>
-        </div>
-
-        <div class="rd-card">
-          <div class="rd-tag to">到</div>
-          <div class="rd-ent">{{ entName(relForm.to_entity) }}</div>
-          <el-select v-model="relForm.to_key" placeholder="选择关联键" class="rd-sel">
-            <el-option v-for="c in entCols(relForm.to_entity)" :key="c" :value="c" :label="c" />
-          </el-select>
-        </div>
-      </div>
-      <template #footer>
-        <div class="rd-footer">
-          <el-button v-if="relEditing" type="danger" plain @click="deleteRelation">删除</el-button>
-          <span class="rd-spacer"></span>
-          <el-button @click="relDlg = false">取消</el-button>
-          <el-button type="primary" @click="saveRelation">确定</el-button>
-        </div>
-      </template>
-    </el-dialog>
+    <RelationDialog v-model="relDlg" :editing="relEditing" :relation="relForm" :entities="graph.entities"
+                    @save="saveRelation" @delete="deleteRelation" />
 
     <!-- 发布对话框 -->
     <el-dialog v-model="publishOpen" title="发布本体" width="460px">
@@ -236,6 +215,8 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import OntologyCanvas from './ontology/canvas/OntologyCanvas.vue'
 import ImportWizard from './ontology/ImportWizard.vue'
+import RelationDialog from './ontology/RelationDialog.vue'
+import { migrateGraphToV3, type MigrationIssue } from './ontology/migrateGraphV3'
 import EditorMetric from './ontology/EditorMetric.vue'
 import EditorDerivation from './ontology/EditorDerivation.vue'
 import EditorAction from './ontology/EditorAction.vue'
@@ -255,6 +236,8 @@ const name = ref('')
 const description = ref('')
 const saving = ref(false)
 const loading = ref(true)          // 初始即加载态，打开时立刻显示
+const legacyGraph = ref<any | null>(null)
+const migrationIssues = ref<MigrationIssue[]>([])
 
 const visLabel = computed(() => ({ private: '私有', shared: '共享', public: '公开' } as any)[meta.value?.visibility || 'private'])
 
@@ -290,7 +273,14 @@ async function load() {
     name.value = o.name
     description.value = o.description || ''
     const g = o.graph || emptyGraph()
+    if ((g as any).version !== 3) {
+      graph.value = emptyGraph()
+      legacyGraph.value = g
+      return
+    }
+    legacyGraph.value = null
     graph.value = {
+      version: 3,
       entities: g.entities || [], relations: g.relations || [],
       metrics: g.metrics || [], derivations: g.derivations || [], actions: g.actions || [],
       resolvers: g.resolvers || [],
@@ -298,6 +288,28 @@ async function load() {
     syncSqlResolvers()
   } catch (e: any) { ElMessage.error('加载失败：' + (e?.message || e)) }
   finally { loading.value = false }
+}
+
+async function startMigration() {
+  if (!legacyGraph.value || !meta.value?.canEdit) return
+  try {
+    await ElMessageBox.confirm(
+      '转换会在浏览器内生成 graph v3 草稿，不会立刻写库。旧关系的基数/可选性必须逐条确认，指标也需审阅；只有点击「保存」后才覆盖原 graph JSON。是否继续？',
+      '一次性转换为 graph v3', { type: 'warning', confirmButtonText: '生成转换草稿', cancelButtonText: '取消' },
+    )
+  } catch { return }
+  const result = migrateGraphToV3(legacyGraph.value)
+  graph.value = result.graph
+  migrationIssues.value = result.issues
+  legacyGraph.value = null
+  syncSqlResolvers()
+  const pending = graph.value.relations.find((relation) => relation.confirmation?.required && !relation.confirmation.confirmed)
+  if (pending) {
+    relEditing.value = true
+    relForm.value = JSON.parse(JSON.stringify(pending))
+    relDlg.value = true
+  }
+  ElMessage.warning('已生成 graph v3 草稿。请逐条确认关系、审阅指标，再点击保存。')
 }
 
 // ── 本体挂载的 resolver（能力集）──
@@ -356,6 +368,9 @@ function setAttrRole(a: any, role: string) {
     a.additivity = null
   }
 }
+function entityKeys(entity: any): string[] {
+  return Array.isArray(entity?.key) ? entity.key : entity?.key ? [entity.key] : []
+}
 // 启用/停用：停用的属性不进编译器/查询（默认 undefined = 启用）
 const allAttrsEnabled = computed(() => (selEntity.value?.attributes || []).every((a: any) => a.enabled !== false))
 function setAttrEnabled(a: any, v: boolean) { a.enabled = v }
@@ -381,7 +396,8 @@ async function refreshEntity(ent: any): Promise<number> {
       cur.dtype = c.dtype || 'unknown'   // 结构属性可更新；role/additivity/name/synonyms 保留
     } else {
       const dt = c.dtype || 'unknown'
-      const isPk = ent.key && c.column === ent.key
+      const keys = Array.isArray(ent.key) ? ent.key : ent.key ? [ent.key] : []
+      const isPk = keys.includes(c.column)
       const role = (isPk || dt !== 'number') ? 'dimension' : 'measure'
       ent.attributes.push({
         id: `attribute.${local(ent.table)}.${c.column}`, name: c.column, column: c.column,
@@ -411,7 +427,7 @@ function deleteEntity() {
   if (!selEntity.value) return
   const id = selEntity.value.id
   graph.value.entities = graph.value.entities.filter((e) => e.id !== id)
-  graph.value.relations = graph.value.relations.filter((r) => r.from_entity !== id && r.to_entity !== id)
+  graph.value.relations = graph.value.relations.filter((r) => r.from.entity !== id && r.to.entity !== id)
   selEntityId.value = null
   syncSqlResolvers()
 }
@@ -420,10 +436,10 @@ function deleteEntity() {
 const relDlg = ref(false)
 const relEditing = ref(false)
 const relForm = ref<any>(null)
-function entName(id: string) { return graph.value.entities.find((e) => e.id === id)?.name || id }
-function entCols(id: string) {
-  const e = graph.value.entities.find((x) => x.id === id)
-  return e ? e.attributes.map((a) => a.column || a.name) : []
+function keyAttribute(entity: any) {
+  const keys = Array.isArray(entity?.key) ? entity.key : entity?.key ? [entity.key] : []
+  const ids = keys.map((key: string) => entity?.attributes?.find((a: any) => (a.column || a.name) === key)?.id).filter(Boolean)
+  return ids.length === 1 ? ids[0] : ids
 }
 function onConnect(from: string, to: string) {
   if (!meta.value?.canEdit) return
@@ -433,7 +449,14 @@ function onConnect(from: string, to: string) {
   relForm.value = {
     id: `relation.${slug(from)}_${slug(to)}`,
     name: `${fe?.name}-${te?.name}`,
-    from_entity: from, from_key: fe?.key || '', to_entity: to, to_key: te?.key || '',
+    from: { entity: from, attribute: keyAttribute(fe) },
+    to: { entity: to, attribute: keyAttribute(te) },
+    multiplicity: {
+      from_to: { min: 'unknown', max: 'unknown' },
+      to_from: { min: 'unknown', max: 'unknown' },
+    },
+    integrity: { mode: 'DECLARED', source: 'manual', confidence: 1 },
+    temporal: null, semantics: null, synonyms: [],
   }
   relDlg.value = true
 }
@@ -445,14 +468,11 @@ function selectRelation(id: string) {
   relForm.value = { ...r }
   relDlg.value = true
 }
-function saveRelation() {
-  const f = relForm.value
-  if (!f.from_key || !f.to_key) { ElMessage.warning('请选择两侧关联键'); return }
-  const idx = graph.value.relations.findIndex((r) => r.id === f.id)
-  const rel = { id: f.id, name: f.name, from_entity: f.from_entity, from_key: f.from_key,
-                to_entity: f.to_entity, to_key: f.to_key, synonyms: [], semantics: null }
-  if (idx >= 0) graph.value.relations[idx] = rel as any
-  else graph.value.relations.push(rel as any)
+function saveRelation(rel: any) {
+  const idx = graph.value.relations.findIndex((r) => r.id === rel.id)
+  if (idx >= 0) graph.value.relations[idx] = rel
+  else graph.value.relations.push(rel)
+  migrationIssues.value = migrationIssues.value.filter((issue) => !(issue.kind === 'relation' && issue.id === rel.id))
   relDlg.value = false
 }
 function deleteRelation() {
@@ -493,14 +513,19 @@ const conceptAttrs = computed<Record<string, any>>({
   get() {
     const c = selConcept.value
     if (!c) return {}
-    if (tab.value === 'metrics') return { expr: c.expr }
+    if (tab.value === 'metrics') return { expression: c.expression, result_type: c.result_type, unit: c.unit }
     if (tab.value === 'derivations') return { prompt: c.prompt, inputs: c.inputs || [] }
     return { action: c.action, desc: c.desc }
   },
   set(v) {
     const c = selConcept.value
     if (!c) return
-    if (tab.value === 'metrics') c.expr = v.expr
+    if (tab.value === 'metrics') {
+      c.expression = v.expression; c.result_type = v.result_type; c.unit = v.unit
+      if (v.expression?.value || v.expression?.function === 'COUNT') {
+        migrationIssues.value = migrationIssues.value.filter((issue) => !(issue.kind === 'metric' && issue.id === c.id))
+      }
+    }
     else if (tab.value === 'derivations') { c.prompt = v.prompt; c.inputs = v.inputs }
     else { c.action = v.action; c.desc = v.desc }
   },
@@ -510,7 +535,7 @@ function addConcept() {
   const prefix = { metrics: 'metric', derivations: 'derivation', actions: 'action' }[tab.value]
   const id = `${prefix}.new_${Date.now().toString(36)}`
   const base: any = { id, name: '新概念', semantics: null, synonyms: [] }
-  if (tab.value === 'metrics') base.expr = ''
+  if (tab.value === 'metrics') base.expression = { kind: 'aggregate', function: 'SUM', value: null, nulls: 'IGNORE' }
   else if (tab.value === 'derivations') { base.prompt = ''; base.inputs = [] }
   else { base.action = ''; base.desc = '' }
   ;(graph.value as any)[tab.value].push(base)
@@ -537,16 +562,29 @@ function onImported(frag: ImportFragment) {
   const relIds = new Set(graph.value.relations.map((r) => r.id))
   for (const r of frag.relations) if (!relIds.has(r.id)) graph.value.relations.push(r as any)
   syncSqlResolvers()
-  ElMessage.success(`导入 ${frag.entities.length} 个实体、${frag.relations.length} 个关系`)
+  const pending = frag.relations.find((relation) => relation.confirmation?.required && !relation.confirmation.confirmed)
+  if (pending) {
+    relEditing.value = true
+    relForm.value = JSON.parse(JSON.stringify(pending))
+    relDlg.value = true
+    ElMessage.warning(`已导入实体；请确认 ${frag.relations.length} 条关系的基数和可选性后再保存`)
+  } else {
+    ElMessage.success(`导入 ${frag.entities.length} 个实体、${frag.relations.length} 个关系`)
+  }
 }
 
 // ── 保存 / 发布 ──
 async function save() {
   if (!name.value.trim()) { ElMessage.warning('请填写名称'); return }
+  const pending = graph.value.relations.filter((relation) => relation.confirmation?.required && !relation.confirmation?.confirmed)
+  if (pending.length) { ElMessage.warning(`还有 ${pending.length} 条导入关系未确认，请逐条打开关系并确认语义`); return }
+  const metricIssues = migrationIssues.value.filter((issue) => issue.kind === 'metric')
+  if (metricIssues.length) { ElMessage.warning(`还有 ${metricIssues.length} 个旧指标无法自动转换，请在指标编辑器中重新配置后再保存`); return }
   saving.value = true
   try {
     await saveOntology(props.ontologyId, name.value.trim(), description.value || null, graph.value)
     isNewId.value = false
+    migrationIssues.value = []
     ElMessage.success('已保存')
   } catch (e: any) { ElMessage.error('保存失败：' + (e?.message || e)) }
   finally { saving.value = false }
@@ -557,6 +595,8 @@ const publishing = ref(false)
 const pubVis = ref('public')
 const pubGrants = ref<string[]>([])
 async function doPublish() {
+  const pending = graph.value.relations.filter((relation) => relation.confirmation?.required && !relation.confirmation?.confirmed)
+  if (pending.length) { ElMessage.warning(`还有 ${pending.length} 条关系未确认，不能发布`); return }
   publishing.value = true
   try {
     await publishOntology(props.ontologyId, pubVis.value, pubGrants.value)
@@ -612,6 +652,9 @@ function slug(s: string) {
 .oe-desc-in { width: 100%; border: 1px solid transparent; border-radius: 8px; padding: 7px 11px; font-size: 13px; color: var(--beone-text-regular); font-family: inherit; line-height: 1.5; resize: vertical; display: block; box-sizing: border-box; background: var(--beone-bg-panel-muted); transition: background .15s, border-color .15s; }
 .oe-desc-in:hover { background: #eef2f6; }
 .oe-desc-in:focus { border-color: var(--beone-border-strong); background: #fff; outline: none; }
+.migration-banner { margin:0 16px 12px; border:1px solid #efcf91; background:#fff8ea; border-radius:10px; padding:12px 14px; display:flex; align-items:center; gap:16px; }
+.migration-banner > div { flex:1; display:flex; flex-direction:column; gap:3px; }.migration-banner b { color:#8a5418; }.migration-banner span { color:#7b6b58; font-size:12px; }
+.migration-review { margin:0 16px 12px; border-left:4px solid #d08a2f; background:#fffaf1; border-radius:8px; padding:10px 13px; display:flex; flex-direction:column; gap:4px; font-size:11px; color:#705d45; max-height:130px; overflow:auto; }
 .oe-body { flex: 1; min-height: 0; display: flex; padding: 0 16px 16px; gap: 0; }
 .oe-canvas {
   flex: 1;

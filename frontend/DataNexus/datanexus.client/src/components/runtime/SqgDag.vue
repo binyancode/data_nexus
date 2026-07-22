@@ -28,9 +28,9 @@
           <span class="nd-name">{{ selected.name || selected.id }}</span>
           <span class="nd-close" @click="selectedId = null">✕</span>
         </div>
-        <div class="nd-row" v-if="selected.concept"><b>概念</b><span>{{ selected.concept }}</span></div>
         <div class="nd-row" v-if="selected.depends_on?.length"><b>依赖</b><span>{{ selected.depends_on.join(', ') }}</span></div>
-        <div class="nd-block" v-if="hasParams"><b>参数</b><pre>{{ pretty(selected.params) }}</pre></div>
+        <div class="nd-block" v-if="Object.keys(selected.inputs ?? {}).length"><b>输入</b><pre>{{ pretty(selected.inputs) }}</pre></div>
+        <div class="nd-block"><b>Typed Spec</b><pre>{{ pretty(selected.spec) }}</pre></div>
       </div>
     </transition>
   </div>
@@ -53,9 +53,9 @@ interface SqgNode {
   id: string
   operator: string
   name?: string
-  concept?: string
-  params?: Record<string, unknown>
+  spec: Record<string, unknown>
   depends_on?: string[]
+  inputs?: Record<string, { node: string; output?: string; row?: number }>
 }
 const props = defineProps<{ sqg: { nodes?: SqgNode[] } | null }>()
 
@@ -130,8 +130,6 @@ const edges = computed(() => {
 })
 
 const selected = computed(() => rawNodes.value.find((n) => n.id === selectedId.value) || null)
-const hasParams = computed(() => selected.value?.params && Object.keys(selected.value.params).length > 0)
-
 function onNodeClick(e: { node: { id: string } }) {
   selectedId.value = e.node.id
 }

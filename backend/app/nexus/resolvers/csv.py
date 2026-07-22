@@ -1,7 +1,7 @@
 """CsvResolver：把一个本地文件夹里的 CSV 当数据源，用 DuckDB 执行取数。
 
-与 SqlResolver 完全独立、零耦合：自己持有 DuckDB 连接、自己把 QuerySpec 渲染成
-DuckDB SQL、自己探测列结构。config 来自 local_file_credential.to_config()：
+持有独立 DuckDB 连接，通过共享 typed QueryIR renderer 生成 DuckDB SQL，并探测列结构。
+config 来自 local_file_credential.to_config()：
   { base_dir: 本地文件夹, filename: 可选 }
 
 filename 决定实体粒度（describe 据此枚举候选表）：
@@ -19,8 +19,10 @@ import glob as _glob
 import os
 from typing import Any, Optional
 
-from nexus.core.models import NodeResult, ExecContext, QuerySpec
+from nexus.core.models import NodeResult, ExecContext
+from nexus.core.physical import QueryIR
 from nexus.resolvers.base import Resolver
+from nexus.resolvers.query_renderer import QueryRenderer
 
 
 # DuckDB 类型 → 粗粒度语义类型（concept 是语义层，不绑死某引擎的类型表）
@@ -37,18 +39,6 @@ _COARSE_TYPE = {
 
 _GLOB_CHARS = set("*?[")
 
-# 日期格式 token（yyyy-MM-dd 式）→ DuckDB strptime 占位符
-_FMT_TOKENS = [("yyyy", "%Y"), ("MM", "%m"), ("dd", "%d"),
-               ("HH", "%H"), ("mm", "%M"), ("ss", "%S")]
-
-
-def _to_strptime(fmt: str) -> str:
-    out = fmt or ""
-    for tok, rep in _FMT_TOKENS:
-        out = out.replace(tok, rep)
-    return out.replace("'", "''")   # 防注入：转义单引号
-
-
 def _coarse_type(raw: str) -> str:
     base = (raw or "").strip().lower().split("(")[0].strip()   # DECIMAL(18,2) → decimal
     return _COARSE_TYPE.get(base, "unknown")
@@ -57,7 +47,7 @@ def _coarse_type(raw: str) -> str:
 class CsvResolver(Resolver):
     resolver_type = "csv"
     provides_concepts = True
-    operators = {"SELECT", "FILTER", "AGGREGATE", "JOIN"}
+    operators = {"SELECT", "AGGREGATE"}
 
     def __init__(self, name: str, config: dict = None):
         super().__init__(name, config)
@@ -89,78 +79,20 @@ class CsvResolver(Resolver):
             return f"read_csv_auto('{path}', union_by_name=true)"
         return f"read_csv_auto('{path}')"
 
-    # ── QuerySpec → DuckDB SQL（自渲染，与 SqlResolver 无共享）──
-    def _cond(self, f, params: list) -> str:
-        """一条过滤渲染成条件串（用于 WHERE 或 CASE WHEN），把值追加进 params。"""
-        if f.op == "IN":
-            vals = f.value if isinstance(f.value, list) else [f.value]
-            params.extend(vals)
-            return f"{f.col} IN ({','.join(['?'] * len(vals))})"
-        # 日期过滤：按 value_format 用 strptime 显式解析，避免隐式转换歧义
-        rhs = f"CAST(strptime(?, '{_to_strptime(f.value_format)}') AS DATE)" if f.value_format else "?"
-        params.append(f.value)
-        return f"{f.col} {f.op} {rhs}"
+    def compile(self, query: QueryIR) -> dict:
+        rendered = QueryRenderer(table_source=self._table_source).render(query)
+        return {"sql": rendered.sql, "params": rendered.params}
 
-    def compile(self, spec: QuerySpec) -> dict:
-        if spec.from_alias:
-            from_sql = f"{self._table_source(spec.from_table)} {spec.from_alias}"
-            for j in spec.joins:
-                from_sql += f" JOIN {self._table_source(j.table)} {j.alias} ON {j.on_left} = {j.on_right}"
-        else:
-            from_sql = self._table_source(spec.from_table)
-
-        # 多测度融合：CASE 参数（SELECT 列表）在前、WHERE 参数在后，与 SQL 从左到右一致
-        if spec.selects:
-            sel_params: list = []
-            cols = []
-            for s in spec.selects:
-                if s.filters:               # P2 条件聚合
-                    conds = " AND ".join(self._cond(f, sel_params) for f in s.filters)
-                    cols.append(f"{s.agg}(CASE WHEN {conds} THEN {s.inner} END) AS {s.alias}")
-                else:                       # P1 多测度
-                    cols.append(f"{s.expr} AS {s.alias}")
-            where_params: list = []
-            where = [self._cond(f, where_params) for f in spec.filters]
-            head = (f"{spec.label_expr} AS label, " if spec.label_expr else "") + ", ".join(cols)
-            sql = f"SELECT {head} FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            if spec.label_expr:
-                sql += f" GROUP BY {spec.label_expr}"
-            return {"sql": sql, "params": sel_params + where_params}
-
-        # 单测度路径
-        params: list = []
-        where = [self._cond(f, params) for f in spec.filters]
-
-        if spec.label_expr and not spec.value_expr:
-            # 纯列举维度（去重）：SELECT DISTINCT 维度
-            sql = f"SELECT DISTINCT {spec.label_expr} AS value FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            sql += f" ORDER BY value {spec.order}"
-            if spec.limit:
-                sql += f" LIMIT {int(spec.limit)}"
-        elif spec.label_expr:
-            sql = f"SELECT {spec.label_expr} AS label, {spec.value_expr} AS value FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            sql += f" GROUP BY {spec.label_expr}"
-            if spec.having:
-                sql += f" HAVING {spec.value_expr} {spec.having.op} ?"
-                params.append(spec.having.value)
-            sql += f" ORDER BY value {spec.order}"
-            if spec.limit:
-                sql += f" LIMIT {int(spec.limit)}"
-        else:
-            sql = f"SELECT {spec.value_expr} AS value FROM {from_sql}"
-            if where:
-                sql += " WHERE " + " AND ".join(where)
-            if spec.having:
-                sql += f" HAVING {spec.value_expr} {spec.having.op} ?"
-                params.append(spec.having.value)
-
-        return {"sql": sql, "params": params}
+    def capabilities(self) -> dict:
+        base = super().capabilities()
+        base["relational"] = {
+            "filter": ["EQ", "NE", "GT", "GTE", "LT", "LTE", "IN", "BETWEEN", "LIKE"],
+            "join": ["INNER", "LEFT"],
+            "aggregates": ["SUM", "COUNT", "COUNT_DISTINCT", "AVG", "MIN", "MAX", "MEDIAN", "PERCENTILE", "VARIANCE", "STDDEV"],
+            "time_grains": ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"],
+            "conditional_aggregate": True, "top_n": True,
+        }
+        return base
 
     def fetch(self, call: dict, ctx: Optional[ExecContext] = None) -> NodeResult:
         node_id = call.get("node_id", "")

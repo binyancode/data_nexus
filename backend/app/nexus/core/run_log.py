@@ -1,11 +1,11 @@
-"""运行记录：Nexus 四段引擎执行过程的记录接口（依赖倒置）。
+"""运行记录：Nexus 五段引擎执行过程的记录接口（依赖倒置）。
 
 - RunRecorder：记录接口。nexus 引擎只依赖此接口，不碰 DB。
 - NullRunRecorder：空实现，未注册记录器时的默认（不落库）。
 - register_run_recorder / get_run_recorder：app 层把 DB 实现注册进来。
 
 生命周期（增量落库，供前端轮询看进度）：
-    start_run → [start_stage → (start_node → finish_node)* → finish_stage]×4 → finish_run
+    start_run → [start_stage → (start_node → finish_node)* → finish_stage]×5 → finish_run
 三层对应三张表：run / run_stage / run_node（见设计文档 §24）。
 """
 

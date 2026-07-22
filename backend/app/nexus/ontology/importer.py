@@ -33,6 +33,7 @@ def build_fragment(resolver_name: str, describe: dict, primary_keys: dict,
     selected = set(tables)
     entities = []
     ent_by_table: dict[str, str] = {}
+    attr_by_table_col: dict[tuple[str, str], str] = {}
 
     for i, table in enumerate(tables):
         cols = describe.get(table, [])
@@ -55,12 +56,19 @@ def build_fragment(resolver_name: str, describe: dict, primary_keys: dict,
                 "id": aid, "name": col, "column": col,
                 "role": role, "dtype": dtype,
                 "additivity": ("additive" if role == "measure" else None),
+                "constraints": {
+                    "nullable": c.get("nullable"),
+                    "unique": bool(c.get("unique") or is_pk),
+                    "primary_key": is_pk,
+                    "source": "imported",
+                },
                 "synonyms": [], "semantics": None,
             })
+            attr_by_table_col[(table, col)] = aid
         entities.append({
             "id": eid, "name": _local(table), "semantics": None, "synonyms": [],
             "resolver": resolver_name, "table": table,
-            "key": pk[0] if pk else None,
+            "key": list(pk) if pk else None,
             "attributes": attributes,
             "layout": {"x": 80 + (i % 3) * 340, "y": 80 + (i // 3) * 320},
         })
@@ -70,11 +78,34 @@ def build_fragment(resolver_name: str, describe: dict, primary_keys: dict,
         ft, tt = fk["from_table"], fk["to_table"]
         if ft in selected and tt in selected and ft != tt:
             fe, te = ent_by_table[ft], ent_by_table[tt]
+            from_cols = list(fk.get("from_cols") or [])
+            to_cols = list(fk.get("to_cols") or [])
+            from_attrs = [attr_by_table_col.get((ft, col)) for col in from_cols]
+            to_attrs = [attr_by_table_col.get((tt, col)) for col in to_cols]
+            if not from_attrs or not to_attrs or any(value is None for value in [*from_attrs, *to_attrs]):
+                continue
+            from_columns = [next((c for c in describe.get(ft, []) if c.get("column") == col), {})
+                            for col in from_cols]
+            from_unique = len(from_columns) == 1 and bool(from_columns[0].get("unique"))
+            nullable_values = [column.get("nullable") for column in from_columns]
+            nullable = True if any(value is True for value in nullable_values) else \
+                False if nullable_values and all(value is False for value in nullable_values) else None
             relations.append({
                 "id": f"relation.{_local(ft)}_{_local(tt)}",
                 "name": f"{_local(ft)}-{_local(tt)}", "semantics": None, "synonyms": [],
-                "from_entity": fe, "from_key": fk["from_col"],
-                "to_entity": te, "to_key": fk["to_col"],
+                "from": {"entity": fe, "attribute": from_attrs[0] if len(from_attrs) == 1 else from_attrs},
+                "to": {"entity": te, "attribute": to_attrs[0] if len(to_attrs) == 1 else to_attrs},
+                "multiplicity": {
+                    "from_to": {"min": (0 if nullable is True else 1 if nullable is False else "unknown"), "max": 1},
+                    "to_from": {"min": "unknown", "max": (1 if from_unique else "many")},
+                },
+                "integrity": {
+                    "mode": "ENFORCED",
+                    "source": "DATABASE_FOREIGN_KEY",
+                    "constraint_name": fk.get("constraint_name"),
+                    "confidence": 1.0,
+                },
+                "confirmation": {"required": True, "confirmed": False},
             })
 
-    return {"entities": entities, "relations": relations}
+    return {"version": 3, "entities": entities, "relations": relations}

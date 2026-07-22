@@ -29,8 +29,9 @@
           <span class="nd-badge">{{ stateLabel(state?.state) }}</span>
           <span class="nd-close" @click="selectedId = null">✕</span>
         </div>
-        <div class="nd-row"><b>算子</b><span>{{ selected.operator }}</span></div>
-        <div class="nd-row"><b>源</b><span>{{ state?.resolver || selected.resolver || '—' }}</span></div>
+        <div class="nd-row"><b>类型</b><span>{{ selected.kind }}</span></div>
+        <div class="nd-row"><b>位置</b><span>{{ state?.resolver || selected.source_instance || selected.engine || selected.resolver || '—' }}</span></div>
+        <div class="nd-row" v-if="selected.realizes?.length"><b>实现</b><span>{{ selected.realizes.map((r) => r.logical_node).join(', ') }}</span></div>
         <div class="nd-row" v-if="selected.depends_on?.length"><b>依赖</b><span>{{ selected.depends_on.join(', ') }}</span></div>
         <div class="nd-row" v-if="state?.value != null"><b>值</b><span class="nd-val">{{ state.value }}</span></div>
         <div class="nd-row" v-if="state?.source"><b>来源</b><span>{{ state.source }}</span></div>
@@ -58,12 +59,15 @@ const nodeTypes: any = { dagNode: markRaw(DagNode) }
 
 interface PlanNode {
   id: string
-  operator: string
+  kind: string
   name?: string
+  source_instance?: string
+  engine?: string
   resolver?: string
   depends_on?: string[]
   wave?: number
   call?: unknown
+  realizes?: Array<{ logical_node: string }>
 }
 const props = defineProps<{
   plan: { nodes?: PlanNode[] } | null
@@ -101,30 +105,24 @@ const nodes = computed(() => {
   const ns = planNodes.value
   const pos = layoutPos.value
   const over = posOverride.value
-  // 合并节点 = 被某个 PROJECT 节点依赖的节点（融合优化产物）
-  const mergeIds = new Set<string>()
-  for (const n of ns) {
-    if (n.operator === 'PROJECT') (n.depends_on ?? []).forEach((d) => mergeIds.add(d))
-  }
   return ns.map((n) => {
     const s = st(n.id)
     const rn = props.nodeStates?.[n.id]
     const raw = rn?.value != null && rn.value !== '' ? String(rn.value) : stateLabel(s)
     const tail = raw.length > 26 ? raw.slice(0, 26) + '…' : raw
-    const isMerge = mergeIds.has(n.id)
-    const isProject = n.operator === 'PROJECT'
+    const isMerge = (n.realizes?.length || 0) > 1
     const cost = rn?.cost_ms != null ? fmtCost(rn.cost_ms) : undefined
     return dagNode(
       n.id,
       over[n.id] ?? pos.get(n.id) ?? { x: 0, y: 0 },
       {
         name: n.name || n.id,
-        badge: isProject ? '拆分' : n.operator,
+        badge: n.kind,
         value: tail,
         color: stateColor(s),
         cost,
         selected: n.id === selectedId.value,
-        fuseTag: isMerge ? '合并执行' : isProject ? '拆分' : undefined,
+        fuseTag: isMerge ? `融合 ${n.realizes!.length} 项` : undefined,
       },
       s === 'running' ? 'rn-pulse' : '',
     )

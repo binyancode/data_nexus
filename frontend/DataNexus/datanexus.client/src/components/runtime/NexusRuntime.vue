@@ -18,7 +18,7 @@
     <div v-if="error" class="rt-error">{{ error }}</div>
 
     <template v-else>
-      <!-- 四段流水线：stage —交接物→ stage -->
+      <!-- 五段流水线：stage —交接物→ stage -->
       <div class="pipeline">
         <template v-for="p in pipeline" :key="p.stage.id">
           <button class="chip" :class="{ active: selected === p.stage.id, running: stOf(p.stage.id) === 'running' }" @click="pick(p.stage.id)">
