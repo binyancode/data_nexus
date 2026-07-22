@@ -182,6 +182,14 @@ class sql_db:
         """执行非查询语句（复用池化连接；连接失效自动重连重试）。返回受影响行数。"""
         return self._run(query, params, fetch=False)
 
+    def open_dedicated_connection(self):
+        """创建调用方独占的非池化连接。
+
+        用于依赖会话状态的流程（例如 SQL Server Compute 的 EXECUTE AS 与
+        本地 #temp 表）。调用方必须关闭连接；该连接绝不进入共享连接池。
+        """
+        return self._create_connection()
+
     def close(self) -> None:
         """关闭池中所有连接（进程退出/重置时调用）。"""
         with self._pool_lock:

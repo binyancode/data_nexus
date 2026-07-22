@@ -28,10 +28,16 @@ from nexus.engine.binder import Binder, BindingError
 
 
 class Optimizer:
-    def __init__(self, ontology, registry=None, allowed: Optional[set] = None):
+    def __init__(self, ontology, registry=None, allowed: Optional[set] = None,
+                 compute_engine_name: str = "duckdb",
+                 compute_engine_type: str = "duckdb",
+                 compute_capabilities: Optional[dict] = None):
         self.ontology = ontology
         self.registry = registry
         self.allowed = set(allowed) if allowed is not None else None
+        self.compute_engine_name = compute_engine_name
+        self.compute_engine_type = compute_engine_type
+        self.compute_capabilities = compute_capabilities or {}
         self.binder = Binder(ontology)
         self.trace = OptimizationTrace()
 
@@ -46,6 +52,7 @@ class Optimizer:
                 "bound_logical_plan": logical.model_dump(mode="json"),
             }
         plan = self._physical(sqg, binding, logical)
+        self._bind_compute_engine(plan)
         self._waves(plan)
         self.trace.selected_plan = "selected"
         self.trace.candidates.append(PlanCandidate(
@@ -59,6 +66,30 @@ class Optimizer:
                 "optimization_trace": self.trace.model_dump(mode="json"),
             })
         return plan
+
+    def _bind_compute_engine(self, plan: PhysicalExecutionPlan) -> None:
+        supported = set(self.compute_capabilities.get("aggregates") or [])
+        for fragment in plan.nodes:
+            if not isinstance(fragment, ComputeFragment):
+                continue
+            required = set()
+            for output in fragment.query.outputs:
+                required |= {
+                    str(getattr(value, "value", value))
+                    for value in aggregate_functions(output.aggregate)
+                }
+            missing = required - supported if supported else set()
+            if missing:
+                raise BindingError(
+                    f"计算引擎 {self.compute_engine_name!r} ({self.compute_engine_type}) "
+                    f"不支持聚合函数：{', '.join(sorted(missing))}"
+                )
+            fragment.engine = self.compute_engine_name
+        plan.context.update({
+            "compute_engine_name": self.compute_engine_name,
+            "compute_engine_type": self.compute_engine_type,
+            "compute_capabilities": self.compute_capabilities,
+        })
 
     def _physical(self, sqg: SQG, binding: SemanticBindingArtifact,
                   logical: BoundLogicalPlan) -> PhysicalExecutionPlan:
@@ -525,8 +556,10 @@ class Optimizer:
         )
         self.trace.rules.append(RuleDecision(
             rule="cross_source_fragmentation", outcome="applied", logical_nodes=[task.id],
-            reason="task spans multiple source instances; source projection + DuckDB compute selected",
-            details={"sources": binding.source_instances},
+            reason="task spans multiple source instances; source projection + temporary compute selected",
+            details={"sources": binding.source_instances,
+                     "compute_engine": self.compute_engine_name,
+                     "compute_engine_type": self.compute_engine_type},
         ))
         return [*fragments, *exchanges, compute]
 

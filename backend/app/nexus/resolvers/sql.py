@@ -11,7 +11,7 @@ from services.sql_db import sql_db
 from nexus.core.models import NodeResult, ExecContext
 from nexus.core.physical import QueryIR
 from nexus.resolvers.base import Resolver
-from nexus.resolvers.query_renderer import SqlServerRenderer
+from nexus.resolvers.sql_server_query_renderer import SqlServerQueryRenderer
 
 
 # 原生 DB 类型 → 粗粒度语义类型（concept 是语义层，不绑死某库的类型表）
@@ -31,10 +31,10 @@ def _coarse_type(raw: str) -> str:
 
 
 class SqlResolver(Resolver):
-    """标准 SQL 取数源（默认 SQL Server / Azure SQL 语法）。
+    """SQL Server 取数源。
 
-    任何 SQL 兼容库都可直接复用；个别语法有差异的库（如 Databricks 用 LIMIT）
-    子类化本类、覆写 `_limit_clause` 一个方法即可，无需另建方言体系。
+    其它数据库即使大体兼容 SQL，也必须提供自己的 Resolver 和 QueryRenderer
+    实现，不能通过覆盖单个 LIMIT 片段假定方言兼容。
     """
 
     resolver_type = "sql"
@@ -53,7 +53,7 @@ class SqlResolver(Resolver):
         return f"{self.name}:{self.config.get('database', '')}"
 
     def compile(self, query: QueryIR) -> dict:
-        rendered = SqlServerRenderer().render(query)
+        rendered = SqlServerQueryRenderer().render(query)
         return {"sql": rendered.sql, "params": rendered.params}
 
     def capabilities(self) -> dict:

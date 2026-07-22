@@ -6,8 +6,18 @@ export interface AskStarted {
   run_id: string
 }
 
-export async function ask(q: string, ontologyId?: string | null, llmName?: string | null): Promise<AskStarted> {
+export async function ask(
+  q: string,
+  ontologyId?: string | null,
+  llmName?: string | null,
+  computeEngineName?: string | null,
+): Promise<AskStarted> {
   const url = await backendUrl('ask')
   // unwrap=false：后端返回 { run_id }
-  return service.post(url, { q, ontology_id: ontologyId || null, llm_name: llmName || null }, true, false)
+  return service.post(url, {
+    q,
+    ontology_id: ontologyId || null,
+    llm_name: llmName || null,
+    compute_engine_name: computeEngineName || null,
+  }, true, false)
 }

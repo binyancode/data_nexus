@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 
 from core.api_handler import api_handler
 from services.credential import credential, azure_keyvault_credential_provider
+from services.sql_db import sql_db
 
 router = APIRouter()
 
@@ -97,8 +98,16 @@ async def credential_update(request: Request, name: str = None,
 @api_handler.auth()
 @api_handler.service()
 async def credential_delete(request: Request, name: str = None,
-                            cred: azure_keyvault_credential_provider = None):
+                            cred: azure_keyvault_credential_provider = None,
+                            db: sql_db = None):
     """删除凭据（软删 DB 映射 + 删 KV 密文）。"""
     name = name or request.path_params.get("name")
+    refs = db.execute_query(
+        "SELECT engine_name FROM nexus.compute_engines "
+        "WHERE credential_name = ? AND is_active = 1", (name,)
+    )
+    if refs:
+        names = "、".join(row["engine_name"] for row in refs)
+        return {"state": "error", "message": f"凭据仍被计算引擎引用：{names}"}
     ok = cred.delete(name)
     return {"deleted": bool(ok), "credential_name": name}

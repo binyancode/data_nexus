@@ -1241,11 +1241,11 @@ Optimizer 根据 `depends_on` 做拓扑分波：
 
 ### 15.3 执行过程
 
-1. Coordinator 创建一次 run 独享的 DuckDB `:memory:` 实例。
+1. Coordinator 按 PEP 绑定的计算引擎配置，创建一次 run 独享的 ComputeEngine 实例。
 2. 对每个 input，将上游 `NodeResult.rows` 加载为临时表。
-3. 根据首批非空 Python 值推断 DuckDB 类型：boolean、bigint、double、timestamp、date 或 varchar。
-4. 使用通用 QueryRenderer 生成参数化 DuckDB SQL。
-5. 执行查询；若 `into` 有值，则先 `CREATE TABLE AS` 再读回。
+3. 引擎按自身类型系统推断临时列类型；DuckDB 使用内存表，SQL Server 使用当前 Session 的 `#temp` 表。
+4. 引擎通过统一 `QueryRenderer` 接口调用自己的独立方言实现，生成参数化 SQL。
+5. 执行查询；DuckDB 可用 `CREATE TABLE AS` 物化，SQL Server 在同一独占连接内物化到 `#temp`。
 6. 返回 rows，并通过 `realizes` 发布逻辑结果。
 
 ### 15.4 典型用途
@@ -1358,18 +1358,22 @@ Renderer 按 `zip(left, right)` 生成多个等值条件，并以 AND 连接。
 | `order_by` | SORT | 8 |
 | `limit` | LIMIT/TOP | 9 |
 
-### 17.5 方言差异
+### 17.5 独立方言 Renderer
 
-| 能力 | DuckDB/通用 Renderer | SQL Server Renderer |
+`QueryRenderer` 只定义 `render(QueryIR) -> RenderedQuery` 接口，不包含任何 SQL 生成实现。`DuckDbQueryRenderer` 与 `SqlServerQueryRenderer` 分别拥有完整查询结构、表达式、聚合、排序和 limit 策略；两者互不继承，避免以某一方言作为“通用 SQL”。
+
+| 能力 | DuckDbQueryRenderer | SqlServerQueryRenderer |
 |---|---|---|
 | 标识符 | `"name"` | `[name]` |
 | limit | `LIMIT n` | `TOP (n)` |
 | 时间桶 | `date_trunc` | `CAST/DATEADD/DATEFROMPARTS` |
-| median/percentile | `quantile_cont/disc` | `PERCENTILE_CONT/DISC` 语法 |
-| null ordering | `NULLS FIRST/LAST` | 当前移除显式 NULLS 子句 |
+| 条件聚合 | 原生 `FILTER (WHERE ...)` | `CASE WHEN ... THEN ... END` |
+| median/percentile | `quantile_cont/disc` | `PERCENTILE_CONT/DISC ... OVER (PARTITION BY ...)` |
+| null ordering | 原生 `NULLS FIRST/LAST` | 外层投影 + `CASE` 保留显式空值顺序 |
+| 除法 | DuckDB 数值除法 | 乘 `1.0` 防止 T-SQL 整数截断 |
 | 参数 | `?` | `?` |
 
-Optimizer 依据 Resolver `capabilities().relational.aggregates` 决定是否允许聚合源端下推；例如当前 SQL Resolver 未声明 MEDIAN/PERCENTILE，因此会提升到 Compute Fragment，即使 Renderer 存在对应语法方法。
+Optimizer 依据源 Resolver 与所选 Compute Engine 各自声明的 capabilities 决定下推或临时计算；Renderer 同时在编译边界拒绝其方言未声明支持的运算，不能靠生成“看似相近”的 SQL 静默降级。
 
 ---
 
@@ -1638,7 +1642,7 @@ Optimizer stage logs 保存：
 ### 21.3 AGGREGATE ranking
 
 - `ties=INCLUDE` 已进入模型，但当前 Renderer 仍使用普通 TOP/LIMIT，没有实现“包含并列值”的专属语义。
-- SQL Server Renderer 会移除 `NULLS FIRST/LAST`，因此 SQL Server 的实际空值顺序仍依赖数据库默认行为。
+- SQL Server 没有原生 `NULLS FIRST/LAST`，当前 Renderer 通过外层排序投影和 `CASE` 明确保留该语义。
 - `unknown_label` 已建模，但 `KEEP_AS_UNKNOWN` 当前只选择 LEFT JOIN，没有自动 `COALESCE` 成该标签。
 
 ### 21.4 CALCULATE
@@ -1722,7 +1726,9 @@ Optimizer stage logs 保存：
 - Binder：[`backend/app/nexus/engine/binder.py`](../backend/app/nexus/engine/binder.py)
 - Optimizer：[`backend/app/nexus/engine/optimizer.py`](../backend/app/nexus/engine/optimizer.py)
 - Coordinator：[`backend/app/nexus/engine/coordinator.py`](../backend/app/nexus/engine/coordinator.py)
-- DuckDB Compute：[`backend/app/nexus/engine/compute.py`](../backend/app/nexus/engine/compute.py)
-- Query Renderer：[`backend/app/nexus/resolvers/query_renderer.py`](../backend/app/nexus/resolvers/query_renderer.py)
+- Compute Engines：[`backend/app/nexus/engine/compute.py`](../backend/app/nexus/engine/compute.py)
+- Query Renderer 接口：[`backend/app/nexus/resolvers/query_renderer.py`](../backend/app/nexus/resolvers/query_renderer.py)
+- DuckDB Renderer：[`backend/app/nexus/resolvers/duckdb_query_renderer.py`](../backend/app/nexus/resolvers/duckdb_query_renderer.py)
+- SQL Server Renderer：[`backend/app/nexus/resolvers/sql_server_query_renderer.py`](../backend/app/nexus/resolvers/sql_server_query_renderer.py)
 - Generator：[`backend/app/nexus/engine/generator.py`](../backend/app/nexus/engine/generator.py)
 - Resolver 基类：[`backend/app/nexus/resolvers/base.py`](../backend/app/nexus/resolvers/base.py)

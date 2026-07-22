@@ -54,6 +54,10 @@
                     "prefix": "/credentials",
                     "tags": ["Credentials"]
                 },
+                "compute_engines.router": {
+                    "prefix": "/compute-engines",
+                    "tags": ["Compute Engines"]
+                },
                 "me.router": {
                     "prefix": "/me",
                     "tags": ["Auth"]

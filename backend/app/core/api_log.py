@@ -22,7 +22,7 @@ class ApiLogRecord:
     user: Optional[str] = None
     payload: Optional[str] = None
     response: Optional[str] = None
-    message: Optional[str] = None        # 出错时的完整堆栈（用于定位报错行）；成功/未触发异常时为 None
+    message: Optional[str] = None        # 异常时完整堆栈；已处理 4xx 时为响应错误信息
     cost_ms: int = 0
     source: str = "backend"              # backend | bff
     request_time: Optional[datetime] = None

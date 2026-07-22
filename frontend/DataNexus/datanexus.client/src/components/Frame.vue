@@ -5,7 +5,12 @@
         <FrameHeader :active-menu="activeMenu" @menu-select="onMenuSelect" />
       </el-header>
       <el-main class="frame-main">
-        <keep-alive>
+        <component
+          v-if="activeMenu === 'compute-engines'"
+          :is="activeComponent"
+          v-bind="activeComponentProps"
+        />
+        <keep-alive v-else>
           <component :is="activeComponent" v-bind="activeComponentProps" />
         </keep-alive>
       </el-main>
@@ -28,6 +33,7 @@ const RunsPage = defineAsyncComponent(() => import('./RunsPage.vue'))
 const OntologiesPage = defineAsyncComponent(() => import('./OntologiesPage.vue'))
 const CredentialsPage = defineAsyncComponent(() => import('./CredentialsPage.vue'))
 const LlmsPage = defineAsyncComponent(() => import('./LlmsPage.vue'))
+const ComputeEnginesPage = defineAsyncComponent(() => import('./ComputeEnginesPage.vue'))
 const ResolversPage = defineAsyncComponent(() => import('./ResolversPage.vue'))
 
 const activeMenu = ref('ask')
@@ -42,6 +48,7 @@ const componentMap: Record<string, Component> = {
   ontology: OntologiesPage,
   credentials: CredentialsPage,
   llms: LlmsPage,
+  'compute-engines': ComputeEnginesPage,
   resolvers: ResolversPage,
 }
 

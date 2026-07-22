@@ -67,8 +67,9 @@ class Initializer:
             raise ValueError("；".join(problems) or "找不到可用的本体。")
 
         ctx.ontology_ids = [o.ontology_id for o in valid]
+        ctx.context["ontology_ids"] = ctx.ontology_ids
         ctx.recorder.set_run_context(
-            ctx.run_id, json.dumps({"ontology_ids": ctx.ontology_ids}, ensure_ascii=False))
+            ctx.run_id, json.dumps(ctx.context, ensure_ascii=False))
 
         # 装配合并作用域：每本体命名空间化 → 合并；allowed / available_ops 取并集
         subs = [JsonOntology(o.graph, ns=o.ontology_id) for o in valid]

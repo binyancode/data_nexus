@@ -59,6 +59,7 @@ const menuItems = [
   { id: 'ontology', label: '本体', icon: 'Share' },
   { id: 'resolvers', label: '源管理', icon: 'Coin' },
   { id: 'llms', label: 'LLM', icon: 'MagicStick' },
+  { id: 'compute-engines', label: '计算引擎', icon: 'Cpu' },
   { id: 'credentials', label: '凭据', icon: 'Key' },
 ]
 

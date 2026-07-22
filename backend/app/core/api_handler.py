@@ -72,19 +72,46 @@ def _serialize_response(resp) -> Optional[str]:
         return None
 
 
+def _response_json(resp) -> Optional[dict]:
+    """提取 dict/JSONResponse 的 JSON 对象，供状态判定和错误日志复用。"""
+    if isinstance(resp, dict):
+        return resp
+    text = _serialize_response(resp)
+    if not text:
+        return None
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else None
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _response_error_message(resp) -> Optional[str]:
+    payload = _response_json(resp) or {}
+    code = getattr(resp, "status_code", 200)
+    state = str(payload.get("state") or "").lower()
+    if code >= 400 or state in ("error", "failed", "denied", "unauthorized"):
+        message = payload.get("message") or payload.get("detail")
+        return str(message) if message is not None else _serialize_response(resp)
+    return None
+
+
 def _derive_state(resp, error: Optional[str]) -> str:
     """根据异常/响应状态码区分日志状态。"""
     if error:
         return "failed"
     code = getattr(resp, "status_code", 200)
+    payload_state = str((_response_json(resp) or {}).get("state") or "").lower()
     if code == 401:
         return "unauthorized"
     if code == 403:
         return "denied"
     if code >= 500:
         return "failed"
-    if code >= 400:
+    if code >= 400 or payload_state == "error":
         return "error"
+    if payload_state == "failed":
+        return "failed"
     return "success"
 
 
@@ -175,7 +202,7 @@ class api_handler:
                         user=user,
                         payload=payload,
                         response=_serialize_response(resp),
-                        message=tb,
+                        message=tb or _response_error_message(resp),
                         cost_ms=cost,
                         source="backend",
                         request_time=request_time,

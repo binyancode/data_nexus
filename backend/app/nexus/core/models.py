@@ -129,6 +129,10 @@ class ExecContext:
         self.ontology_ids: list[str] = []                 # 本次运行选中的本体集合（初始化器填）
         self.requested_ontology_id: Optional[str] = None  # 用户显式指定的本体（None=交初始化器 LLM 路由）
         self.llm_name: Optional[str] = None       # 本次运行选中的规划 LLM（None=用默认）
+        self.requested_compute_engine_name: Optional[str] = None  # API 显式选择；None=默认
+        self.compute_engine_name: Optional[str] = None            # 注册表解析后的配置名
+        self.compute_engine_type: Optional[str] = None            # duckdb | sql_server
+        self.compute_engine_lease: bool = False                   # 注册表运行租约（client finally 释放）
         self.cancellation_token = cancellation_token
         self.started_at = time.time()
         self.results: dict[str, NodeResult] = {}   # node_id -> NodeResult

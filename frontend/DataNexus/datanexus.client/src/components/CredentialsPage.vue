@@ -60,6 +60,15 @@
           <div v-if="f.description" class="hint">{{ f.description }}</div>
         </div>
       </template>
+      <el-alert
+        v-if="saveError"
+        class="save-error"
+        title="保存失败"
+        :description="saveError"
+        type="error"
+        :closable="false"
+        show-icon
+      />
       </div>
 
       <template #footer>
@@ -90,6 +99,7 @@ const types = ref<Record<string, CredentialTypeMeta>>({})
 const dlg = ref(false)
 const editing = ref(false)
 const saving = ref(false)
+const saveError = ref('')
 const detailLoading = ref(false)
 const form = reactive<{ credential_name: string; credential_type: string; description: string; data: Record<string, any> }>({
   credential_name: '', credential_type: '', description: '', data: {},
@@ -135,6 +145,7 @@ async function load() {
 function reset() {
   form.credential_name = ''; form.credential_type = ''; form.description = ''; form.data = {}
   for (const k of Object.keys(dirty)) delete dirty[k]
+  saveError.value = ''
   editing.value = false
 }
 
@@ -171,6 +182,7 @@ async function openEdit(row: CredentialListItem) {
 }
 
 async function submit() {
+  saveError.value = ''
   saving.value = true
   try {
     if (editing.value) {
@@ -188,7 +200,8 @@ async function submit() {
     dlg.value = false
     await load()
   } catch (e: any) {
-    ElMessage.error('保存失败：' + (e?.message || e))
+    saveError.value = e?.response?.data?.message || e?.message || String(e)
+    ElMessage.error('保存失败，完整错误已显示在弹窗内')
   } finally {
     saving.value = false
   }
@@ -222,4 +235,11 @@ async function remove(row: CredentialListItem) {
 .sens { color: #b7791f; font-size: 10px; margin-left: 6px; background: #fdf3e3; border-radius: 4px; padding: 1px 5px; }
 .sec-t { font-size: 12px; font-weight: 700; color: #55697f; margin: 10px 0 8px; }
 .hint { font-size: 11px; color: #93a2b4; margin-top: 4px; }
+.save-error { margin-top: 12px; }
+.save-error :deep(.el-alert__description) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+  user-select: text;
+}
 </style>

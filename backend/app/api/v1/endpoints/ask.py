@@ -25,11 +25,13 @@ async def ask(request: Request, nexus: NexusClient = None):
         return {"state": "error", "message": "问题不能为空"}
     ontology_id = body.get("ontology_id")   # 显式指定；缺省则由 LLM 自动路由
     llm_name = body.get("llm_name")         # 本次运行选中的规划 LLM；缺省用默认
+    compute_engine_name = body.get("compute_engine_name")  # 缺省由计算引擎注册表选默认
 
     # start_ask 同步建 run 后返回 run_id；本体选择/校验在后台的「初始化器」段完成（选不到→失败段，前端轮询可见）
     try:
         run_id = nexus.start_ask(question=question, as_user=as_user,
-                                 ontology_id=ontology_id, llm_name=llm_name)
+                                 ontology_id=ontology_id, llm_name=llm_name,
+                                 compute_engine_name=compute_engine_name)
     except ValueError as ex:
         return {"state": "error", "message": str(ex)}
 

@@ -67,6 +67,53 @@ CREATE TABLE [nexus].[llms] (
 );
 GO
 
+-- ── 临时计算引擎注册表 ────────────────────────────────────────────────────
+CREATE TABLE [nexus].[compute_engines] (
+    [engine_name] nvarchar(100) NOT NULL,
+    [engine_type] nvarchar(50) NOT NULL,
+    [config] nvarchar(MAX) NULL,
+    [credential_name] nvarchar(200) NULL,
+    [runtime_user] nvarchar(128) NULL,
+    [is_default] bit NOT NULL DEFAULT ((0)),
+    [is_active] bit NOT NULL DEFAULT ((1)),
+    [provision_state] nvarchar(32) NOT NULL DEFAULT ('ready'),
+    [provision_error] nvarchar(MAX) NULL,
+    [creation_time] datetime2(7) NOT NULL DEFAULT (sysutcdatetime()),
+    [update_time] datetime2(7) NULL,
+    CONSTRAINT [PK_compute_engines] PRIMARY KEY ([engine_name]),
+    CONSTRAINT [CK_compute_engines_type] CHECK ([engine_type] IN ('duckdb', 'sql_server')),
+    CONSTRAINT [CK_compute_engines_state] CHECK ([provision_state] IN (
+        'provisioning', 'ready', 'provision_failed', 'deleting', 'delete_failed'
+    )),
+    CONSTRAINT [CK_compute_engines_default_ready] CHECK (
+        [is_default] = 0 OR ([is_active] = 1 AND [provision_state] = 'ready')
+    ),
+    CONSTRAINT [CK_compute_engines_config_json] CHECK ([config] IS NULL OR ISJSON([config]) = 1),
+    CONSTRAINT [CK_compute_engines_fields] CHECK (
+        ([engine_type] = 'duckdb' AND [credential_name] IS NULL AND [runtime_user] IS NULL)
+        OR
+        ([engine_type] = 'sql_server' AND [credential_name] IS NOT NULL AND [runtime_user] IS NOT NULL)
+    )
+);
+GO
+
+CREATE UNIQUE INDEX [UX_compute_engines_default]
+    ON [nexus].[compute_engines] ([is_default])
+    WHERE [is_default] = 1 AND [is_active] = 1;
+GO
+
+CREATE UNIQUE INDEX [UX_compute_engines_runtime_user]
+    ON [nexus].[compute_engines] ([credential_name], [runtime_user])
+    WHERE [runtime_user] IS NOT NULL;
+GO
+
+INSERT INTO [nexus].[compute_engines]
+    ([engine_name], [engine_type], [config], [credential_name], [runtime_user],
+     [is_default], [is_active], [provision_state], [creation_time])
+VALUES
+    (N'duckdb', N'duckdb', N'{}', NULL, NULL, 1, 1, N'ready', SYSUTCDATETIME());
+GO
+
 -- ── 本体（一行一份，graph 为整块 JSON）────────────────────────────────────
 CREATE TABLE [nexus].[ontology] (
     [ontology_id] nvarchar(64) NOT NULL,

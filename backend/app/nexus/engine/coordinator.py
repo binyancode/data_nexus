@@ -20,6 +20,7 @@ from nexus.core.physical import (
     SourceFragment,
 )
 from nexus.registry import ResolverRegistry
+from nexus.engine.compute_registry import ComputeEngineRegistry
 
 
 def _dumps(value) -> str:
@@ -27,21 +28,22 @@ def _dumps(value) -> str:
 
 
 class Coordinator:
-    def __init__(self, registry: ResolverRegistry):
+    def __init__(self, registry: ResolverRegistry,
+                 compute_registry: ComputeEngineRegistry | None = None):
         self.registry = registry
+        self.compute_registry = compute_registry
 
     def execute(self, plan: PhysicalExecutionPlan, ctx: ExecContext) -> dict[str, NodeResult]:
-        ctx.context = plan.context or {}
+        ctx.context = {**ctx.context, **(plan.context or {})}
         ctx.physical_results = {}
         parallelism = int(ctx.context.get("parallelism", 4) or 4)
-        needs_compute = any(isinstance(node, (ComputeFragment, ExchangeFragment))
-                            or (isinstance(node, CapabilityFragment) and node.resolver == "(compute)")
-                            for node in plan.nodes)
+        needs_compute = any(isinstance(node, ComputeFragment) for node in plan.nodes)
         if needs_compute:
-            from nexus.engine.compute import DuckDbCompute
-            import threading
-            ctx.compute = DuckDbCompute()
-            ctx.compute.lock = threading.Lock()
+            if self.compute_registry is not None:
+                ctx.compute = self.compute_registry.create(ctx.compute_engine_name, ctx.run_id)
+            else:  # 单元测试/嵌入调用的向后兼容默认值
+                from nexus.engine.compute import DuckDbCompute
+                ctx.compute = DuckDbCompute()
         try:
             for wave in self._waves(plan):
                 if self._cancelled(ctx):
@@ -137,11 +139,13 @@ class Coordinator:
         with engine.lock:
             for item in node.inputs:
                 source = ctx.physical_results.get(item.from_fragment)
-                engine.load(item.table, list(source.rows) if source else [])
+                engine.load(item.table, list(source.rows) if source else [],
+                            list(source.columns) if source else [])
             rows = engine.run(node.query, into=node.into)
         return NodeResult(node_id=node.id, resolver="(compute)", output=rows,
                           rows=rows, columns=list(rows[0]) if rows else [],
-                          source="compute:duckdb", detail="typed QueryIR")
+                          source=f"compute:{engine.name}",
+                          detail=f"typed QueryIR ({engine.engine_type})")
 
     def _capability_call(self, node: CapabilityFragment, call: dict, ctx: ExecContext):
         result = dict(call)

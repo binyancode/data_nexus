@@ -17,22 +17,36 @@
           />
           <div class="ask-actions">
             <div class="ask-onto">
-              <span class="ao-label">本体</span>
-              <el-select v-model="ontologyId" size="small" placeholder="自动" class="ao-sel">
-                <el-option value="" label="自动（智能路由）" />
-                <el-option v-for="o in ontologies" :key="o.ontologyId" :value="o.ontologyId" :label="o.name" />
-              </el-select>
-              <span class="ao-label">模型</span>
-              <el-select v-model="llmName" size="small" placeholder="默认" class="ao-sel">
-                <el-option value="" label="默认" />
-                <el-option v-for="l in llms" :key="l.llm_name" :value="l.llm_name"
-                           :label="l.is_default ? l.llm_name + '（默认）' : l.llm_name" />
-              </el-select>
+              <div class="ask-option">
+                <span class="ao-label">本体</span>
+                <el-select v-model="ontologyId" size="small" placeholder="自动" class="ao-sel">
+                  <el-option value="" label="自动（智能路由）" />
+                  <el-option v-for="o in ontologies" :key="o.ontologyId" :value="o.ontologyId" :label="o.name" />
+                </el-select>
+              </div>
+              <div class="ask-option">
+                <span class="ao-label">模型</span>
+                <el-select v-model="llmName" size="small" placeholder="默认" class="ao-sel">
+                  <el-option value="" label="默认" />
+                  <el-option v-for="l in llms" :key="l.llm_name" :value="l.llm_name"
+                             :label="l.is_default ? l.llm_name + '（默认）' : l.llm_name" />
+                </el-select>
+              </div>
+              <div class="ask-option">
+                <span class="ao-label">计算引擎</span>
+                <el-select v-model="computeEngineName" size="small" placeholder="默认" class="ao-sel">
+                  <el-option value="" label="默认" />
+                  <el-option v-for="e in computeEngines" :key="e.engine_name" :value="e.engine_name"
+                             :label="e.is_default ? e.engine_name + '（默认）' : e.engine_name" />
+                </el-select>
+              </div>
             </div>
-            <span class="ask-hint">Enter 提问 · Shift+Enter 换行</span>
-            <el-button type="primary" :loading="loading" :disabled="!question.trim()" @click="onAsk">
-              提问
-            </el-button>
+            <div class="ask-submit">
+              <span class="ask-hint">Enter 提问 · Shift+Enter 换行</span>
+              <el-button type="primary" :loading="loading" :disabled="!question.trim()" @click="onAsk">
+                提问
+              </el-button>
+            </div>
           </div>
         </div>
 
@@ -134,10 +148,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onActivated, onMounted } from 'vue'
 import { ask } from '../backend/Ask.js'
 import { listOntologies, type OntologyMeta } from '../bff/Ontology.js'
 import { listLlms, type LlmItem } from '../bff/Llms.js'
+import { listComputeEngines, type ComputeEngineItem } from '../backend/ComputeEngines.js'
 import NexusRuntime from './runtime/NexusRuntime.vue'
 import MarkdownContent from './common/MarkdownContent.vue'
 import type { RuntimeAnswer } from './runtime/dag'
@@ -172,10 +187,18 @@ const ontologyId = ref('')
 const ontologies = ref<OntologyMeta[]>([])
 const llmName = ref('')
 const llms = ref<LlmItem[]>([])
+const computeEngineName = ref('')
+const computeEngines = ref<ComputeEngineItem[]>([])
 
 onMounted(async () => {
   try { ontologies.value = await listOntologies() } catch { /* ignore */ }
   try { llms.value = await listLlms() } catch { /* ignore */ }
+})
+
+onActivated(async () => {
+  try {
+    computeEngines.value = (await listComputeEngines()).filter((item) => item.provision_state === 'ready')
+  } catch { /* ignore */ }
 })
 
 const examples = [
@@ -206,7 +229,12 @@ async function onAsk() {
   askError.value = ''
   lastQuestion.value = q
   try {
-    const res = await ask(q, ontologyId.value || null, llmName.value || null)
+    const res = await ask(
+      q,
+      ontologyId.value || null,
+      llmName.value || null,
+      computeEngineName.value || null,
+    )
     runId.value = res.run_id
   } catch (e: any) {
     askError.value = e?.message || String(e)
@@ -282,17 +310,26 @@ function onRuntimeDone(a: RuntimeAnswer) {
 }
 
 .ask-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   margin-top: 8px;
   padding: 0 4px;
+  gap: 16px;
 }
 
 .ask-onto {
   display: flex;
   align-items: center;
-  gap: 8px;
+  min-width: 0;
+  gap: 12px;
+}
+
+.ask-option {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
 }
 
 .ao-label {
@@ -302,12 +339,20 @@ function onRuntimeDone(a: RuntimeAnswer) {
 }
 
 .ao-sel {
-  width: 150px;
+  width: 132px;
+}
+
+.ask-submit {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 12px;
 }
 
 .ask-hint {
   font-size: 12px;
   color: var(--beone-text-secondary);
+  white-space: nowrap;
 }
 
 .ask-examples {
@@ -573,5 +618,42 @@ function onRuntimeDone(a: RuntimeAnswer) {
 .err-icon { font-size: 40px; color: #e0736a; margin-bottom: 6px; }
 .err-title { font-size: 15px; font-weight: 600; color: #b23b32; margin: 0; }
 .err-sub { font-size: 13px; color: #8a6d6a; margin: 0; max-width: 520px; line-height: 1.6; }
+
+@media (max-width: 860px) {
+  .ask-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .ask-onto {
+    flex-wrap: wrap;
+  }
+
+  .ask-submit {
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 560px) {
+  .ask-option {
+    width: 100%;
+  }
+
+  .ao-label {
+    width: 52px;
+  }
+
+  .ao-sel {
+    flex: 1;
+    width: auto;
+  }
+
+  .ask-submit {
+    justify-content: space-between;
+  }
+
+  .ask-hint {
+    font-size: 11px;
+  }
+}
 </style>
 

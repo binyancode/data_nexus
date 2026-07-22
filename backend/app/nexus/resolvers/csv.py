@@ -1,6 +1,6 @@
 """CsvResolver：把一个本地文件夹里的 CSV 当数据源，用 DuckDB 执行取数。
 
-持有独立 DuckDB 连接，通过共享 typed QueryIR renderer 生成 DuckDB SQL，并探测列结构。
+持有独立 DuckDB 连接，通过 DuckDB 自有 QueryIR renderer 生成 SQL，并探测列结构。
 config 来自 local_file_credential.to_config()：
   { base_dir: 本地文件夹, filename: 可选 }
 
@@ -22,7 +22,7 @@ from typing import Any, Optional
 from nexus.core.models import NodeResult, ExecContext
 from nexus.core.physical import QueryIR
 from nexus.resolvers.base import Resolver
-from nexus.resolvers.query_renderer import QueryRenderer
+from nexus.resolvers.duckdb_query_renderer import DuckDbQueryRenderer
 
 
 # DuckDB 类型 → 粗粒度语义类型（concept 是语义层，不绑死某引擎的类型表）
@@ -80,7 +80,7 @@ class CsvResolver(Resolver):
         return f"read_csv_auto('{path}')"
 
     def compile(self, query: QueryIR) -> dict:
-        rendered = QueryRenderer(table_source=self._table_source).render(query)
+        rendered = DuckDbQueryRenderer(table_source=self._table_source).render(query)
         return {"sql": rendered.sql, "params": rendered.params}
 
     def capabilities(self) -> dict:

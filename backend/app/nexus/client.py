@@ -19,6 +19,7 @@ from nexus.engine.compiler import Compiler
 from nexus.engine.optimizer import Optimizer
 from nexus.engine.coordinator import Coordinator
 from nexus.engine.generator import Generator
+from nexus.engine.compute_registry import ComputeEngineRegistry
 from nexus.core.relations import RelationContract
 
 _logger = get_logger("nexus")
@@ -42,13 +43,15 @@ class NexusClient:
 
         self.repo = OntologyRepository(self._schema)
         self.registry = ResolverRegistry(onto_conf).load()
+        self.compute_registry = ComputeEngineRegistry(self._schema)
         self.initializer = Initializer(self.repo, self.registry)
-        self.coordinator = Coordinator(self.registry)
+        self.coordinator = Coordinator(self.registry, self.compute_registry)
         self.generator = Generator()
 
     def start_ask(self, question: str, as_user: Optional[str] = None,
                   ontology_id: Optional[str] = None, run_id: Optional[str] = None,
-                  llm_name: Optional[str] = None) -> str:
+                  llm_name: Optional[str] = None,
+                  compute_engine_name: Optional[str] = None) -> str:
         """同步建 run 并返回 run_id，随后后台线程执行五段引擎：
         初始化器 → 编译器 → 优化器 → 协调器 → 生成器。
 
@@ -60,17 +63,40 @@ class NexusClient:
         ctx = ExecContext(question, as_user, run_id=run_id)
         ctx.llm_name = llm_name
         ctx.requested_ontology_id = ontology_id
+        ctx.requested_compute_engine_name = compute_engine_name
+        self._prepare_compute_engine(ctx)
         ctx.recorder = get_run_recorder()
-        # context 建 run 时留空（本体未知）；初始化器选完后写 {"ontology_ids":[...]}
-        ctx.recorder.start_run(ctx.run_id, question, as_user)
-        threading.Thread(target=self.ask, args=(ctx,), daemon=True).start()
+        # 本体此时未知；先持久化请求/选中的计算引擎，初始化器随后合并 ontology_ids。
+        try:
+            ctx.recorder.start_run(ctx.run_id, question, as_user, _dumps(ctx.context))
+            threading.Thread(target=self.ask, args=(ctx,), daemon=True).start()
+        except Exception:
+            self.compute_registry.release(ctx.compute_engine_name)
+            ctx.compute_engine_lease = False
+            raise
         return ctx.run_id
+
+    def _prepare_compute_engine(self, ctx: ExecContext) -> None:
+        if ctx.compute_engine_lease:
+            return
+        definition = self.compute_registry.acquire(
+            ctx.requested_compute_engine_name or ctx.compute_engine_name
+        )
+        ctx.compute_engine_name = definition.engine_name
+        ctx.compute_engine_type = definition.engine_type
+        ctx.compute_engine_lease = True
+        ctx.context.update({
+            "compute_engine_requested": ctx.requested_compute_engine_name,
+            "compute_engine_selected": definition.engine_name,
+            "compute_engine_type": definition.engine_type,
+        })
 
     def ask(self, ctx: ExecContext) -> Answer:
         question = ctx.question
         rec = ctx.recorder
         run_state, answer = "done", None
         try:
+            self._prepare_compute_engine(ctx)
             scope = self._stage(ctx, "initializer",
                                 lambda: self.initializer.run(ctx),
                                 _dumps({"question": question,
@@ -84,7 +110,14 @@ class NexusClient:
                               _dumps({"question": question, "ontology_ids": ctx.ontology_ids}),
                               lambda r: r.model_dump_json())
             plan = self._stage(ctx, "optimizer",
-                               lambda: Optimizer(scope.ontology, self.registry, scope.allowed).plan(sqg, ctx),
+                               lambda: Optimizer(
+                                   scope.ontology, self.registry, scope.allowed,
+                                   compute_engine_name=ctx.compute_engine_name or "duckdb",
+                                   compute_engine_type=ctx.compute_engine_type or "duckdb",
+                                   compute_capabilities=self.compute_registry.capabilities(
+                                       ctx.compute_engine_name
+                                   ),
+                               ).plan(sqg, ctx),
                                sqg.model_dump_json(),
                                lambda r: r.model_dump_json())        # ← 前端画 flow 的结构来源
             self._stage(ctx, "coordinator",
@@ -99,8 +132,13 @@ class NexusClient:
             run_state = "failed"
             _logger.warning(f"run {ctx.run_id} failed:\n{traceback.format_exc()}")
         finally:
-            rec.finish_run(ctx.run_id, run_state,
-                           (answer.model_dump_json() if answer else None), ctx.cost_ms)
+            try:
+                rec.finish_run(ctx.run_id, run_state,
+                               (answer.model_dump_json() if answer else None), ctx.cost_ms)
+            finally:
+                if ctx.compute_engine_lease:
+                    self.compute_registry.release(ctx.compute_engine_name)
+                    ctx.compute_engine_lease = False
 
         if answer is None:
             answer = Answer(run_id=ctx.run_id, question=question,
@@ -180,9 +218,13 @@ class NexusClient:
         return self.registry.list_llms()
 
     def reload_registry(self) -> dict:
-        """从 DB 重新装配 resolver / llm（源/凭据/LLM 管理保存后即时生效，免重启）。"""
+        """从 DB 重新装配 resolver / llm / compute engine。"""
         self.registry.reload()
-        return {"resolvers": len(self.registry.all_resolvers()), "llms": len(self.registry.list_llms())}
+        return {
+            "resolvers": len(self.registry.all_resolvers()),
+            "llms": len(self.registry.list_llms()),
+            "compute_engines": len(self.compute_registry.list()),
+        }
 
     def resolver_schema(self, name: str) -> Optional[dict]:
         r = self.registry.resolver(name)
