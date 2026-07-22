@@ -48,6 +48,13 @@ class Coordinator:
                     break
                 self._run_wave(wave, ctx, parallelism)
         finally:
+            llm_calls = [
+                call
+                for result in ctx.physical_results.values()
+                for call in (result.logs or {}).get("llm_calls", [])
+            ]
+            if llm_calls:
+                ctx.stage_logs["llm_calls"] = llm_calls
             if ctx.compute is not None:
                 ctx.compute.close()
                 ctx.compute = None

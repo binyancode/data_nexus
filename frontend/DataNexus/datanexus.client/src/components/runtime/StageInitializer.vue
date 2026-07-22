@@ -1,5 +1,5 @@
 <template>
-  <StageShell :seq="1" title="初始化器" subtitle="选定本体（显式指定 or LLM 路由）· 准备编译上下文" :state="stage?.state" :cost="stage?.cost_ms ?? null">
+  <StageShell :seq="1" title="初始化器" subtitle="选定本体（显式指定 or LLM 路由）· 准备编译上下文" :state="stage?.state" :cost="stage?.cost_ms ?? null" :logs="stage?.logs">
     <div class="flow">
       <div class="col in-col">
         <div class="col-h">输入 · 问题</div>

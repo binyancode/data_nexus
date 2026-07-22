@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 
 from nexus.core.models import ExecContext
+from nexus.llm.base import complete_with_logging
 from nexus.ontology.json_ontology import JsonOntology
 from nexus.ontology.merged import MergedOntology
 from nexus.ontology.repository import OntologyRepository
@@ -105,8 +106,9 @@ class Initializer:
             routed_at, picked_ids = hit
             reused_age = int(time.time() - routed_at)
         else:
-            picked_ids, prompt, cand_ids = self._route(ctx.question, visible,
-                                                       self.registry.llm(ctx.llm_name))
+            picked_ids, prompt, cand_ids = self._route(
+                ctx.question, visible, self.registry.llm(ctx.llm_name), ctx
+            )
             if prompt:
                 ctx.stage_logs["prompt"] = prompt
             if multi and picked_ids:
@@ -148,7 +150,7 @@ class Initializer:
 
     # 从候选本体里选出所有相关的（LLM 按 name + description 判断，可多选）。
     # 返回 (picked_ids: list, prompt|None, candidate_ids)；无 LLM / 单候选时不调模型。
-    def _route(self, question: str, ontologies: list, llm):
+    def _route(self, question: str, ontologies: list, llm, ctx: ExecContext | None = None):
         candidates = list(ontologies)
         cand_ids = [o.ontology_id for o in candidates]
         if not candidates:
@@ -167,9 +169,14 @@ class Initializer:
         )
         prompt = {"system": system, "user": question}
         try:
-            out = llm.complete(
+            llm_calls = ctx.stage_logs.setdefault("llm_calls", []) if ctx is not None else []
+            out = complete_with_logging(
+                llm,
                 [{"role": "system", "content": system}, {"role": "user", "content": question}],
                 schema={"type": "object"},
+                logs=llm_calls,
+                purpose="ontology_routing",
+                metadata={"candidate_count": len(candidates)},
             )
             data = out if isinstance(out, dict) else json.loads(out)
             picked = [i for i in (data.get("ontology_ids") or []) if i in cand_ids]

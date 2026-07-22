@@ -1,5 +1,5 @@
 <template>
-  <StageShell :seq="4" title="协调器" subtitle="分波并行执行 · 回填 · 逐节点取数" :state="stage?.state" :cost="stage?.cost_ms ?? null">
+  <StageShell :seq="4" title="协调器" subtitle="分波并行执行 · 回填 · 逐节点取数" :state="stage?.state" :cost="stage?.cost_ms ?? null" :logs="stage?.logs">
     <div class="prog">
       <div class="prog-bar"><div class="prog-fill" :style="{ width: pct + '%' }"></div></div>
       <span class="prog-txt">{{ doneCount }} / {{ nodes.length }} 完成</span>

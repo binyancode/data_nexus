@@ -1,10 +1,12 @@
 // DAG 布局与状态色（SqgDag / CoordinatorDag 共用）。
 import { MarkerType, type Edge, type Node } from '@vue-flow/core'
+import type { LlmUsageSummary } from './llmUsage'
 
 // 运行完成时 NexusRuntime 向外抛出的最终答案
 export interface RuntimeAnswer {
   text: string
   lineage: { label: string; value: unknown; source: string; detail?: string }[]
+  usage?: LlmUsageSummary
 }
 
 export interface DagNodeIn {

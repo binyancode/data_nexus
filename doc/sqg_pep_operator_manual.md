@@ -1607,6 +1607,20 @@ Optimizer stage logs 保存：
 | `physical_execution_plan` | Fragment PEP、wave、realizes 和 compiled call |
 | `optimization_trace` | 应用/拒绝的规则、候选和选择原因 |
 
+### 20.5 LLM 调用与 Token
+
+每次 LLM 调用在现有 JSON 日志列中保存完整调用记录：
+
+- Initializer、Compiler：`run_stage.logs.llm_calls[]`；
+- ASK：`run_node.logs.llm_calls[]`，并汇总到 Coordinator 的 `run_stage.logs.llm_calls[]`；
+- 每条记录包含输入 messages、原始/解析输出、模型、deployment、request/response id、finish reason、耗时和 usage；
+- usage 包含输入、Cached、未缓存输入、cache write、输出、reasoning 和总 Token，以及 Provider 返回的原始明细；
+- `cached_input_tokens` 是 Azure/OpenAI Prompt Cache 的 `prompt_tokens_details.cached_tokens`，不是系统的路由/SQG/PEP 缓存；
+- Provider 不返回的字段保持空值，不自行估算；
+- API key、endpoint 和 Authorization 不进入日志。
+
+前端在查询完成后汇总显示输入/输出/Cached Token；每个 Stage 详情显示逐次调用明细，ASK 的 PEP 节点详情也显示对应调用。
+
 ---
 
 ## 21. 当前实现边界

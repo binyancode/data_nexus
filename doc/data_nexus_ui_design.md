@@ -98,6 +98,13 @@ Vue
 
 数据类结果不通过 LLM 二次改写。ASK 生成的 Markdown 使用 `marked` 解析并经 DOMPurify 清洗。
 
+查询完成后，答案区显示本次运行去重汇总的 LLM Token：
+
+- 输入 token；
+- 输出 token；
+- Cached token（Provider 返回时显示）；
+- 汇总时同时读取 stage/node 日志，并按 request/response id 去重，避免 Coordinator Stage 与 ASK Node 重复计数。
+
 ### 3.3 出处卡片
 
 每个业务结果显示：
@@ -140,7 +147,9 @@ Initializer → Compiler → Optimizer → Coordinator → Generator
 | Coordinator | Fragment 状态、行数、耗时、重试、逻辑结果注册表 |
 | Generator | 最终 Markdown/表格、lineage、动作回执 |
 
-默认不显示完整 LLM prompt；具有诊断权限的用户可在日志标签查看脱敏内容。
+每个 Stage 详情固定显示 LLM Token 面板：调用次数、输入、输出、Cached、未缓存输入、推理和总 Token；没有 LLM 调用时明确显示“本阶段无 LLM 调用”。每条调用可展开查看实际模型、耗时、request id、finish reason、完整输入、完整输出和原始 usage。Coordinator 的 ASK PEP 节点详情也显示同一调用记录。
+
+LLM 输入输出不包含 API key、endpoint 或 Authorization；展示遵循 run 的访问控制。
 
 ### 4.2 轮询
 

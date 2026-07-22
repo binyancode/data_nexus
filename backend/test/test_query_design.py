@@ -1,5 +1,6 @@
 """Clean-break typed SQG / binder / optimizer / renderer integration tests."""
 
+import copy
 import os
 import pathlib
 import sys
@@ -482,6 +483,7 @@ class QueryDesignTests(unittest.TestCase):
                 "values": [{"kind": "literal", "value": "East", "data_type": "text"}],
             }]}}, "depends_on": [],
         }], "outputs": ["n1"]}
+        raw_repaired = copy.deepcopy(repaired)
         llm = SequenceLLM([malformed, repaired])
         ctx = ExecContext("predicate-shape-regression")
         sqg = Compiler(JsonOntology(graph), llm, available_ops={"AGGREGATE"}).compile(ctx.question, ctx)
@@ -492,6 +494,12 @@ class QueryDesignTests(unittest.TestCase):
         self.assertIn("$defs", llm.schemas[0])
         self.assertEqual(ctx.stage_logs["attempts"][0]["raw_output"], malformed)
         self.assertEqual(ctx.stage_logs["attempts"][1]["raw_output"]["nodes"][0]["id"], "n1")
+        self.assertEqual(len(ctx.stage_logs["llm_calls"]), 2)
+        self.assertEqual(ctx.stage_logs["llm_calls"][0]["purpose"], "sqg_compilation")
+        self.assertEqual(ctx.stage_logs["llm_calls"][0]["metadata"]["attempt"], 1)
+        self.assertEqual(ctx.stage_logs["llm_calls"][0]["input"]["messages"][1]["content"],
+                 "predicate-shape-regression")
+        self.assertEqual(ctx.stage_logs["llm_calls"][1]["output"]["parsed"], raw_repaired)
 
     def test_unknown_relation_disables_cross_source_preaggregation(self):
         with tempfile.TemporaryDirectory() as directory:

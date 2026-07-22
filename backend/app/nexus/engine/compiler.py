@@ -21,6 +21,7 @@ from nexus.core.expressions import (
 )
 from nexus.core.models import ConceptKind, ExecContext
 from nexus.engine.binder import Binder, BindingError
+from nexus.llm.base import complete_with_logging
 
 _MAX_COMPILE_ATTEMPTS = 2
 _SQG_CACHE_TTL_S = 3600
@@ -189,6 +190,7 @@ class Compiler:
         feedback = None
         if ctx is not None:
             ctx.stage_logs["prompt"] = {"system": system, "user": question}
+        llm_calls = ctx.stage_logs.setdefault("llm_calls", []) if ctx is not None else []
         for attempt in range(1, _MAX_COMPILE_ATTEMPTS + 1):
             messages = [
                 {"role": "system", "content": system},
@@ -196,7 +198,10 @@ class Compiler:
             ]
             if feedback:
                 messages.append({"role": "user", "content": feedback})
-            raw = self.llm.complete(messages, schema=SQG.model_json_schema())
+            raw = complete_with_logging(
+                self.llm, messages, schema=SQG.model_json_schema(),
+                logs=llm_calls, purpose="sqg_compilation", metadata={"attempt": attempt},
+            )
             try:
                 data = raw if isinstance(raw, dict) else json.loads(raw)
                 if not data.get("nodes") and data.get("compile_errors"):

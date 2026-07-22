@@ -57,6 +57,11 @@
           <el-icon class="answer-icon"><Opportunity /></el-icon>
           <span class="answer-label">答案</span>
         </div>
+        <div v-if="tokenUsage?.callsWithUsage" class="answer-token-summary">
+          <span>输入 <b>{{ formatTokens(tokenUsage.inputTokens) }}</b></span>
+          <span>输出 <b>{{ formatTokens(tokenUsage.outputTokens) }}</b></span>
+          <span v-if="tokenUsage.cachedAvailable">Cached <b>{{ formatTokens(tokenUsage.cachedInputTokens) }}</b></span>
+        </div>
         <MarkdownContent class="answer-text" :content="answerText" />
 
         <div class="lineage-grid">
@@ -136,6 +141,7 @@ import { listLlms, type LlmItem } from '../bff/Llms.js'
 import NexusRuntime from './runtime/NexusRuntime.vue'
 import MarkdownContent from './common/MarkdownContent.vue'
 import type { RuntimeAnswer } from './runtime/dag'
+import { formatTokens, type LlmUsageSummary } from './runtime/llmUsage'
 import { formatLineageValue, hasMarkdown, isUrlValue } from './runtime/lineageFormat'
 
 interface Cell {
@@ -158,6 +164,7 @@ const loading = ref(false)
 const answerText = ref('')
 const lineage = ref<Cell[]>([])
 const expandedLineage = ref<number | null>(null)
+const tokenUsage = ref<LlmUsageSummary | null>(null)
 const runId = ref<string | null>(null)
 const lastQuestion = ref('')
 const askError = ref('')
@@ -194,6 +201,7 @@ async function onAsk() {
   answerText.value = ''
   lineage.value = []
   expandedLineage.value = null
+  tokenUsage.value = null
   runId.value = null
   askError.value = ''
   lastQuestion.value = q
@@ -210,6 +218,7 @@ async function onAsk() {
 function onRuntimeDone(a: RuntimeAnswer) {
   expandedLineage.value = null
   answerText.value = a.text
+  tokenUsage.value = a.usage ?? null
   lineage.value = (a.lineage || []).map((li) => ({
     label: li.label,
     value: formatLineageValue(li.value),
@@ -361,6 +370,22 @@ function onRuntimeDone(a: RuntimeAnswer) {
 .answer-text {
   margin-bottom: 18px;
 }
+
+.answer-token-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 0 0 12px;
+}
+.answer-token-summary span {
+  padding: 3px 9px;
+  border: 1px solid var(--beone-border);
+  border-radius: 11px;
+  background: var(--beone-bg-panel-muted);
+  color: var(--beone-text-secondary);
+  font-size: 11px;
+}
+.answer-token-summary b { color: var(--beone-text-primary); font-variant-numeric: tabular-nums; }
 
 .lineage-grid {
   display: grid;

@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Optional
 
 from nexus.core.models import NodeResult, ExecContext
+from nexus.llm.base import complete_with_logging
 from nexus.resolvers.base import Resolver
 
 _DEFAULT_SYSTEM = (
@@ -34,18 +35,22 @@ class AgentResolver(Resolver):
         node_id = call.get("node_id", "")
         prompt = call.get("prompt") or call.get("ask") or ""
         system = f"{(call.get('system') or _DEFAULT_SYSTEM).rstrip()}\n\n{_MARKDOWN_OUTPUT}"
+        llm_calls: list[dict] = []
         try:
-            text = self._llm.complete(
-                [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+            text = complete_with_logging(
+                self._llm,
+                [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                logs=llm_calls, purpose="ask_generation",
             )
             text = (text or "").strip()
             return NodeResult(
                 node_id=node_id, resolver=self.name, output=text,
                 rows=[{"value": text}], trust=0.8,
                 source=f"{self.name}:llm", detail=prompt[:300],
-                logs={"prompt": {"system": system, "user": prompt}},
+                logs={"prompt": {"system": system, "user": prompt}, "llm_calls": llm_calls},
             )
         except Exception as exc:
             return NodeResult(node_id=node_id, resolver=self.name, error=str(exc),
                               source=f"{self.name}:llm", detail=prompt[:300],
-                              logs={"prompt": {"system": system, "user": prompt}})
+                            logs={"prompt": {"system": system, "user": prompt},
+                                "llm_calls": llm_calls})

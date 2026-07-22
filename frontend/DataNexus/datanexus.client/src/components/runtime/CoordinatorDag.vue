@@ -36,6 +36,7 @@
         <div class="nd-row" v-if="state?.value != null"><b>值</b><span class="nd-val">{{ state.value }}</span></div>
         <div class="nd-row" v-if="state?.source"><b>来源</b><span>{{ state.source }}</span></div>
         <div class="nd-row" v-if="state?.cost_ms != null"><b>耗时</b><span>{{ state.cost_ms }} ms</span></div>
+        <LlmUsagePanel :logs="state?.logs" :show-empty="false" />
         <div class="nd-block" v-if="callText"><b>调用</b><pre>{{ callText }}</pre></div>
         <div class="nd-block err" v-if="state?.error"><b>错误</b><pre>{{ state.error }}</pre></div>
       </div>
@@ -53,6 +54,7 @@ import '@vue-flow/core/dist/theme-default.css'
 import '@vue-flow/controls/dist/style.css'
 import { computeWaves, positionMap, buildEdges, stateColor, safeParse, dagNode } from './dag'
 import DagNode from './DagNode.vue'
+import LlmUsagePanel from './LlmUsagePanel.vue'
 import type { RunNode } from '../../bff/Runs'
 
 const nodeTypes: any = { dagNode: markRaw(DagNode) }

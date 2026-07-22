@@ -1,5 +1,5 @@
 <template>
-  <StageShell :seq="3" title="优化器" subtitle="语义绑定 → 逻辑计划 IR → 物理执行计划 PEP" :state="stage?.state" :cost="stage?.cost_ms ?? null">
+  <StageShell :seq="3" title="优化器" subtitle="语义绑定 → 逻辑计划 IR → 物理执行计划 PEP" :state="stage?.state" :cost="stage?.cost_ms ?? null" :logs="stage?.logs">
     <el-tabs v-model="tab" class="artifacts">
       <el-tab-pane label="语义绑定" name="binding">
         <div v-if="binding?.tasks?.length" class="cards">

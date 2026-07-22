@@ -10,13 +10,17 @@
       <span class="ss-cost" v-if="cost != null">{{ cost }} ms</span>
       <span class="ss-caret">{{ open ? '▾' : '▸' }}</span>
     </button>
-    <div v-show="open" class="ss-body"><slot /></div>
+    <div v-show="open" class="ss-body">
+      <LlmUsagePanel :logs="logs" />
+      <slot />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { stateColor } from './dag'
+import LlmUsagePanel from './LlmUsagePanel.vue'
 
 const props = defineProps<{
   seq: number
@@ -24,6 +28,7 @@ const props = defineProps<{
   subtitle?: string
   state?: string | null
   cost?: number | null
+  logs?: string | null
 }>()
 
 const open = ref(true)

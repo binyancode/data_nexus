@@ -12,6 +12,9 @@
       >{{ copied ? '✓ 已复制' : ('#' + shortRunId) }}</span>
       <span class="rt-state">{{ stateLabel(runState) }}</span>
       <span class="rt-cost" v-if="detail?.run?.cost_ms">{{ detail?.run?.cost_ms }} ms</span>
+      <span v-if="tokenUsage.callsWithUsage" class="rt-token">输入 {{ formatTokens(tokenUsage.inputTokens) }}</span>
+      <span v-if="tokenUsage.callsWithUsage" class="rt-token">输出 {{ formatTokens(tokenUsage.outputTokens) }}</span>
+      <span v-if="tokenUsage.cachedAvailable" class="rt-token">Cached {{ formatTokens(tokenUsage.cachedInputTokens) }}</span>
       <span v-if="polling" class="rt-spin" title="实时更新中"></span>
     </div>
 
@@ -106,6 +109,7 @@ import StageGenerator from './StageGenerator.vue'
 import StageInitializer from './StageInitializer.vue'
 import SqgDag from './SqgDag.vue'
 import CoordinatorDag from './CoordinatorDag.vue'
+import { collectRunLlmCalls, formatTokens, summarizeLlmCalls } from './llmUsage'
 
 const props = defineProps<{ runId: string | null; question?: string }>()
 const emit = defineEmits<{ (e: 'done', answer: RuntimeAnswer): void }>()
@@ -226,6 +230,9 @@ const nodeStates = computed<Record<string, RunNode>>(() => {
 })
 const resultNodes = computed(() => detail.value?.nodes ?? [])
 const runningNode = computed(() => (detail.value?.nodes ?? []).find((n) => n.state === 'running') ?? null)
+const tokenUsage = computed(() => summarizeLlmCalls(collectRunLlmCalls(
+  detail.value?.stages ?? [], detail.value?.nodes ?? [],
+)))
 
 // 自动跟随当前正在执行的阶段（无正在运行时停在最靠后的已开始阶段，避免闪回）
 const autoTarget = computed(() => {
@@ -252,7 +259,9 @@ watch(runState, (s) => {
   if ((s === 'done' || s === 'failed') && !emitted) {
     emitted = true
     const ans = safeParse<{ text?: string; lineage?: RuntimeAnswer['lineage'] }>(detail.value?.run?.answer ?? null)
-    if (ans) emit('done', { text: ans.text ?? '', lineage: ans.lineage ?? [] })
+    if (ans) emit('done', {
+      text: ans.text ?? '', lineage: ans.lineage ?? [], usage: tokenUsage.value,
+    })
   }
 })
 
@@ -337,6 +346,7 @@ onUnmounted(() => { if (timer) clearTimeout(timer) })
 }
 .rt-q { font-weight: 600; color: var(--tech-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: 0.02em; }
 .rt-state, .rt-cost { font-size: 12px; color: var(--tech-dim); font-variant-numeric: tabular-nums; }
+.rt-token { flex: 0 0 auto; font-size: 10.5px; color: #35516c; border: 1px solid #d7e1ee; background: #f7faff; border-radius: 9px; padding: 2px 7px; font-variant-numeric: tabular-nums; }
 .rt-meta {
   flex: 0 0 auto; font-size: 11.5px; color: var(--tech-dim);
   background: transparent; border: 1px solid var(--tech-border);
