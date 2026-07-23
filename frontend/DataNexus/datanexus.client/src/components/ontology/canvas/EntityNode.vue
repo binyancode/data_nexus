@@ -9,6 +9,11 @@
         <span class="en-name">{{ data.name }}</span>
         <span v-if="data.table" class="en-table">{{ data.table }}</span>
       </div>
+      <button v-if="data.canPreview" type="button" class="en-preview nodrag nopan"
+              title="预览样例数据" aria-label="预览样例数据"
+              @pointerdown.stop @click.stop="data.onPreview?.()">
+        <el-icon><View /></el-icon>
+      </button>
       <span class="en-kind">{{ data.isFact ? '事实' : '维度' }}</span>
     </div>
     <div class="en-body">
@@ -26,6 +31,7 @@
 
 <script setup lang="ts">
 import { Handle, Position } from '@vue-flow/core'
+import { View } from '@element-plus/icons-vue'
 
 defineProps<{
   data: {
@@ -33,6 +39,8 @@ defineProps<{
     table?: string | null
     selected?: boolean
     isFact?: boolean
+    canPreview?: boolean
+    onPreview?: () => void
     attributes: { id: string; name: string; role?: string | null; isKey?: boolean }[]
   }
 }>()
@@ -74,6 +82,14 @@ defineProps<{
   padding: 2px 8px;
   font-weight: 600;
 }
+.en-preview {
+  width:24px; height:24px; display:inline-flex; align-items:center; justify-content:center;
+  flex:0 0 auto; padding:0; border:1px solid transparent; border-radius:6px;
+  background:transparent; color:#698097; cursor:pointer;
+  transition:color .14s, background .14s, border-color .14s;
+}
+.en-preview:hover { color:#176f87; background:#f4fbfd; border-color:#a9ccd7; }
+.en-preview .el-icon { font-size:15px; }
 
 .en-body { padding: 3px 0; max-height: 260px; overflow-y: auto; }
 .en-body {

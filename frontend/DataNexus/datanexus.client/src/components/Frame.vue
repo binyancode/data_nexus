@@ -6,7 +6,7 @@
       </el-header>
       <el-main class="frame-main">
         <component
-          v-if="activeMenu === 'compute-engines'"
+          v-if="nonCachedMenus.has(activeMenu)"
           :is="activeComponent"
           v-bind="activeComponentProps"
         />
@@ -22,10 +22,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, type Component, defineAsyncComponent, ref, onMounted } from 'vue'
+import { computed, type Component, defineAsyncComponent, ref, onMounted, watch } from 'vue'
 import FrameHeader from './FrameHeader.vue'
 import AskConsole from './AskConsole.vue'
-import { loadAuthState } from '../common/authState.js'
+import { authState, loadAuthState } from '../common/authState.js'
 
 // 其余页面懒加载（各自独立 chunk，导航到才拉取）
 const PlaceholderPage = defineAsyncComponent(() => import('./PlaceholderPage.vue'))
@@ -35,8 +35,12 @@ const CredentialsPage = defineAsyncComponent(() => import('./CredentialsPage.vue
 const LlmsPage = defineAsyncComponent(() => import('./LlmsPage.vue'))
 const ComputeEnginesPage = defineAsyncComponent(() => import('./ComputeEnginesPage.vue'))
 const ResolversPage = defineAsyncComponent(() => import('./ResolversPage.vue'))
+const ApiLogsPage = defineAsyncComponent(() => import('./ApiLogsPage.vue'))
+const UsersPage = defineAsyncComponent(() => import('./UsersPage.vue'))
 
 const activeMenu = ref('ask')
+const adminMenus = new Set(['api-logs', 'users'])
+const nonCachedMenus = new Set(['compute-engines', 'api-logs', 'users'])
 
 onMounted(() => {
   loadAuthState()   // 经 BFF 读 nexus.app_user，拿 displayName / is_admin
@@ -50,6 +54,8 @@ const componentMap: Record<string, Component> = {
   llms: LlmsPage,
   'compute-engines': ComputeEnginesPage,
   resolvers: ResolversPage,
+  'api-logs': ApiLogsPage,
+  users: UsersPage,
 }
 
 const activeComponent = computed(() => componentMap[activeMenu.value] ?? PlaceholderPage)
@@ -60,8 +66,13 @@ const activeComponentProps = computed(() => {
 })
 
 function onMenuSelect(menuId: string) {
+  if (adminMenus.has(menuId) && !authState.isAdmin) return
   activeMenu.value = menuId
 }
+
+watch(() => authState.isAdmin, (isAdmin) => {
+  if (!isAdmin && adminMenus.has(activeMenu.value)) activeMenu.value = 'ask'
+})
 </script>
 
 <style scoped>

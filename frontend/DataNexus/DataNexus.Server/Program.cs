@@ -25,7 +25,7 @@ namespace DataNexus.Server
             builder.Services.AddMemoryCache();
             builder.Services.AddHttpContextAccessor();
 
-            // AAD JWT 认证：验证 Bearer 令牌，并校验用户是否在 nexus.app_user 白名单里（缓存 10 分钟）
+            // AAD JWT 认证：验证 Bearer 令牌，并校验用户是否在 nexus.app_user 白名单里（缓存 10 分钟；用户 CRUD 后精确失效）。
             builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 .AddMicrosoftIdentityWebApi(options =>
                 {
@@ -46,7 +46,7 @@ namespace DataNexus.Server
                             }
 
                             var cache = context.HttpContext.RequestServices.GetRequiredService<IMemoryCache>();
-                            var cacheKey = $"AuthUser:{usernameClaim.Value}";
+                            var cacheKey = $"AuthUser:{usernameClaim.Value.Trim().ToLowerInvariant()}";
                             if (!cache.TryGetValue(cacheKey, out bool isAuthorized))
                             {
                                 var sql = context.HttpContext.RequestServices.GetRequiredService<SqlService>();

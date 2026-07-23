@@ -41,6 +41,7 @@ const emit = defineEmits<{
   (e: 'connect', from: string, to: string): void
   (e: 'select-entity', id: string): void
   (e: 'select-relation', id: string): void
+  (e: 'preview-entity', id: string): void
 }>()
 
 const nodeTypes: any = { entity: markRaw(EntityNode) }
@@ -55,6 +56,8 @@ const nodes = computed(() =>
       table: en.table,
       selected: en.id === props.selectedEntity,
       isFact: /fact/i.test(en.table || en.name || ''),
+      canPreview: !!en.resolver && !!en.table,
+      onPreview: () => emit('preview-entity', en.id),
       attributes: en.attributes.map((a) => ({
         id: a.id, name: a.name, role: a.role,
         isKey: (Array.isArray(en.key) ? en.key : en.key ? [en.key] : []).includes(a.column || a.name),

@@ -39,7 +39,41 @@
         <OntologyCanvas
           :graph="graph" :editable="!!meta?.canEdit" :selected-entity="selEntityId"
           @layout="onLayout" @connect="onConnect"
-          @select-entity="selectEntity" @select-relation="selectRelation" />
+          @select-entity="selectEntity" @select-relation="selectRelation"
+          @preview-entity="openSamplePreviewById" />
+
+        <transition name="sample-slide">
+          <section v-if="sampleOpen" class="sample-panel" aria-label="实体样例数据">
+            <header class="sample-head">
+              <div class="sample-title">
+                <span>样例数据 · {{ sampleEntityName }}</span>
+                <small><b>{{ sampleResolver }}</b><i>·</i><code>{{ sampleTarget }}</code></small>
+              </div>
+              <div class="sample-controls">
+                <span>行数</span>
+                <el-select v-model="sampleLimit" size="small" style="width:82px" @change="loadSamplePreview">
+                  <el-option v-for="n in [10, 20, 50, 100]" :key="n" :value="n" :label="String(n)" />
+                </el-select>
+                <el-button size="small" :loading="sampleLoading" @click="loadSamplePreview">刷新</el-button>
+                <button type="button" class="sample-close" title="关闭样例数据" aria-label="关闭样例数据"
+                        @click="sampleOpen = false">✕</button>
+              </div>
+            </header>
+            <div class="sample-content">
+              <el-alert v-if="sampleError" type="error" title="样例数据读取失败" :description="sampleError"
+                        :closable="false" show-icon class="sample-error" />
+              <el-table v-else v-loading="sampleLoading" :data="sampleRows" height="100%" border stripe
+                        empty-text="该实体没有可显示的样例行">
+                <el-table-column v-for="column in sampleColumns" :key="column" :label="column"
+                                 :min-width="sampleColumnWidth(column)" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <span :class="{ 'sample-null': row[column] == null }">{{ formatSampleValue(row[column]) }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </section>
+        </transition>
       </div>
 
       <div class="oe-splitter" :class="{ dragging: resizing }" @mousedown="startResize"></div>
@@ -193,36 +227,6 @@
     </el-dialog>
 
     <ImportWizard v-model="importOpen" @imported="onImported" />
-
-    <el-dialog v-model="sampleOpen" :title="`样例数据 · ${sampleEntityName}`" width="88%" top="6vh"
-               class="sample-dialog" append-to-body destroy-on-close>
-      <div class="sample-toolbar">
-        <div class="sample-source">
-          <span>{{ sampleResolver }}</span>
-          <b>·</b>
-          <code>{{ sampleTarget }}</code>
-        </div>
-        <div class="sample-controls">
-          <span>行数</span>
-          <el-select v-model="sampleLimit" size="small" style="width:86px" @change="loadSamplePreview">
-            <el-option v-for="n in [10, 20, 50, 100]" :key="n" :value="n" :label="String(n)" />
-          </el-select>
-          <el-button size="small" :loading="sampleLoading" @click="loadSamplePreview">刷新</el-button>
-        </div>
-      </div>
-      <el-alert v-if="sampleError" type="error" title="样例数据读取失败" :description="sampleError"
-                :closable="false" show-icon class="sample-error" />
-      <el-table v-else v-loading="sampleLoading" :data="sampleRows" height="58vh" border stripe
-                empty-text="该实体没有可显示的样例行">
-        <el-table-column v-for="column in sampleColumns" :key="column" :label="column"
-                         :min-width="sampleColumnWidth(column)" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span :class="{ 'sample-null': row[column] == null }">{{ formatSampleValue(row[column]) }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
-      <template #footer><el-button @click="sampleOpen = false">关闭</el-button></template>
-    </el-dialog>
 
     <!-- 挂载无 concept 的能力源（Agent / Web IQ / Action 等） -->
     <el-dialog v-model="attachOpen" title="挂载能力源" width="440px">
@@ -430,6 +434,11 @@ function openSamplePreview(entity: any) {
   sampleError.value = ''
   sampleOpen.value = true
   loadSamplePreview()
+}
+
+function openSamplePreviewById(entityId: string) {
+  const entity = graph.value.entities.find((item) => item.id === entityId)
+  if (entity) openSamplePreview(entity)
 }
 
 async function loadSamplePreview() {
@@ -742,6 +751,7 @@ function slug(s: string) {
 .migration-review { margin:0 16px 12px; border-left:4px solid #d08a2f; background:#fffaf1; border-radius:8px; padding:10px 13px; display:flex; flex-direction:column; gap:4px; font-size:11px; color:#705d45; max-height:130px; overflow:auto; }
 .oe-body { flex: 1; min-height: 0; display: flex; padding: 0 16px 16px; gap: 0; }
 .oe-canvas {
+  position: relative;
   flex: 1;
   min-width: 0;
   border: 1px solid #dbe5f1;
@@ -814,13 +824,37 @@ function slug(s: string) {
 }
 .sh-preview:hover { background: #e5f4f8; border-color: #6baabc; }
 .sh-preview:disabled { opacity: .45; cursor: not-allowed; }
-.sample-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:12px; }
-.sample-source { min-width:0; display:flex; align-items:center; gap:7px; color:#667991; font-size:12px; }
-.sample-source code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#29445f; }
+.sample-panel {
+  position:absolute; left:12px; right:12px; bottom:12px; z-index:12;
+  height:clamp(280px, 48%, 480px); min-height:0;
+  display:flex; flex-direction:column; overflow:hidden;
+  background:rgba(255,255,255,.98); border:1px solid #cfdce9; border-radius:14px;
+  box-shadow:0 -10px 34px rgba(23,45,74,.18), 0 4px 14px rgba(23,45,74,.08);
+  backdrop-filter:blur(8px);
+}
+.sample-head {
+  min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:16px;
+  padding:9px 12px 9px 16px; border-bottom:1px solid #dce6f0;
+  background:linear-gradient(180deg,#fbfdff,#f4f8fc);
+}
+.sample-title { min-width:0; display:flex; flex-direction:column; gap:3px; }
+.sample-title > span { color:#21364f; font-size:14px; font-weight:700; }
+.sample-title small { min-width:0; display:flex; align-items:center; gap:6px; color:#7b8da1; font-size:11px; }
+.sample-title small b { color:#2d6780; font-weight:600; }
+.sample-title small i { font-style:normal; }
+.sample-title code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#50667e; }
 .sample-controls { display:flex; align-items:center; gap:8px; color:#667991; font-size:12px; flex:0 0 auto; }
-.sample-error { margin-bottom:12px; }
+.sample-close {
+  width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center;
+  border:0; border-radius:7px; background:transparent; color:#7a8da3; cursor:pointer;
+}
+.sample-close:hover { color:#22384f; background:#e9f0f7; }
+.sample-content { flex:1; min-height:0; padding:10px 12px 12px; }
+.sample-error { height:100%; box-sizing:border-box; align-items:flex-start; }
 .sample-error :deep(.el-alert__description) { white-space:pre-wrap; overflow-wrap:anywhere; user-select:text; }
 .sample-null { color:#9aa8b7; font-style:italic; }
+.sample-slide-enter-active, .sample-slide-leave-active { transition:transform .22s ease, opacity .18s ease; }
+.sample-slide-enter-from, .sample-slide-leave-to { transform:translateY(calc(100% + 18px)); opacity:0; }
 .al-edit {
   padding: 10px 10px 4px; margin: 2px 0 8px;
   background: #f7fafd; border: 1px solid #e6edf5; border-radius: 8px;

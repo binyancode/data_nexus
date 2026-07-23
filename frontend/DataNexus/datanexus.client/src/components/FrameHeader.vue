@@ -53,7 +53,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 // 优先显示 BFF 返回的 displayName（nexus.app_user），否则回退到 AAD 账号
 const username = computed(() => authState.displayName || account.value)
 
-const menuItems = [
+const baseMenuItems = [
   { id: 'ask', label: '提问台', icon: 'ChatDotRound' },
   { id: 'runs', label: '运行历史', icon: 'Histogram' },
   { id: 'ontology', label: '本体', icon: 'Share' },
@@ -61,7 +61,10 @@ const menuItems = [
   { id: 'llms', label: 'LLM', icon: 'MagicStick' },
   { id: 'compute-engines', label: '计算引擎', icon: 'Cpu' },
   { id: 'credentials', label: '凭据', icon: 'Key' },
+  { id: 'api-logs', label: 'API 日志', icon: 'Document', adminOnly: true },
+  { id: 'users', label: '用户', icon: 'UserFilled', adminOnly: true },
 ]
+const menuItems = computed(() => baseMenuItems.filter((item) => !item.adminOnly || authState.isAdmin))
 
 function openHelp() {
   ElMessage.info('Data Nexus：用自然语言提问，看它怎么一步步算出答案。')
