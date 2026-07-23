@@ -155,9 +155,7 @@ class CsvResolver(Resolver):
         key = target or (self._list_tables() or [None])[0]
         if not key:
             return []
-        try:
-            cur = self._dd().execute(f"SELECT * FROM {self._table_source(key)} LIMIT {int(n)}")
-            cols = [d[0] for d in cur.description] if cur.description else []
-            return [dict(zip(cols, r)) for r in cur.fetchall()]
-        except Exception:
-            return []
+        limit = max(1, min(int(n), 100))
+        cur = self._dd().execute(f"SELECT * FROM {self._table_source(key)} LIMIT {limit}")
+        cols = [d[0] for d in cur.description] if cur.description else []
+        return [dict(zip(cols, r)) for r in cur.fetchall()]

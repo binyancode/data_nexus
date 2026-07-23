@@ -30,6 +30,13 @@ export interface ImportFragment {
   relations: RelationEdge[]
 }
 
+export interface ResolverSample {
+  resolver: string
+  target: string
+  columns: string[]
+  rows: Array<Record<string, unknown>>
+}
+
 export async function listResolvers(): Promise<ResolverInfo[]> {
   const url = await backendUrl('resolvers')
   return service.get(url, true, false)
@@ -43,4 +50,9 @@ export async function resolverSchema(name: string): Promise<SchemaInfo> {
 export async function importPreview(name: string, tables: string[]): Promise<ImportFragment> {
   const url = await backendUrl('resolvers/' + encodeURIComponent(name) + '/import-preview')
   return service.post(url, { tables }, true, false)
+}
+
+export async function resolverSample(name: string, target: string, limit = 20): Promise<ResolverSample> {
+  const url = await backendUrl('resolvers/' + encodeURIComponent(name) + '/sample')
+  return service.post(url, { target, limit }, true, false)
 }

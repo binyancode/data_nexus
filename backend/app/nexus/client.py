@@ -232,6 +232,27 @@ class NexusClient:
             return None
         return {"tables": r.describe()}
 
+    def resolver_sample(self, name: str, target: str, limit: int = 20) -> Optional[dict]:
+        """读取一个关系型 Resolver 物理对象的少量样例行，供本体实体检视。"""
+        resolver = self.registry.resolver(name)
+        if resolver is None or not getattr(resolver, "provides_concepts", False):
+            return None
+        rows = resolver.sample(target, max(1, min(int(limit), 100)))
+        columns: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            for column in row:
+                if column not in seen:
+                    seen.add(column)
+                    columns.append(column)
+        if not columns:
+            columns = [
+                str(item.get("column"))
+                for item in (resolver.describe().get(target) or [])
+                if item.get("column")
+            ]
+        return {"resolver": name, "target": target, "columns": columns, "rows": rows}
+
     def import_preview(self, resolver_name: str, tables: list) -> Optional[dict]:
         from nexus.ontology.importer import build_fragment
         r = self.registry.resolver(resolver_name)

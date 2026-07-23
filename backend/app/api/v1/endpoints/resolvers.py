@@ -1,6 +1,8 @@
 """/api/v1/resolvers —— 列出 Resolver、探测其 schema、导入预览（产出可并入画板的 graph 片段）。"""
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 
+from core.api_handler import api_handler
 from core.deps import get_nexus
 from nexus.client import NexusClient
 
@@ -37,3 +39,29 @@ async def import_preview(name: str, request: Request, nexus: NexusClient = Depen
     if frag is None:
         raise HTTPException(status_code=404, detail=f"resolver '{name}' 不可探测")
     return frag
+
+
+@router.post("/{name}/sample")
+@api_handler.log()
+@api_handler.auth()
+@api_handler.service()
+async def resolver_sample(request: Request, name: str = None, nexus: NexusClient = None):
+    """读取实体物理对象的样例行。body: {target, limit?}；最多 100 行。"""
+    name = name or request.path_params.get("name")
+    body = await request.json()
+    target = str(body.get("target") or "").strip()
+    if not target:
+        return JSONResponse({"state": "error", "message": "target 必填"}, status_code=400)
+    try:
+        limit = int(body.get("limit", 20))
+    except (TypeError, ValueError):
+        return JSONResponse({"state": "error", "message": "limit 必须是整数"}, status_code=400)
+    if not 1 <= limit <= 100:
+        return JSONResponse({"state": "error", "message": "limit 必须在 1-100 之间"}, status_code=400)
+    result = nexus.resolver_sample(name, target, limit)
+    if result is None:
+        return JSONResponse(
+            {"state": "error", "message": f"resolver '{name}' 不支持样例数据"},
+            status_code=404,
+        )
+    return result

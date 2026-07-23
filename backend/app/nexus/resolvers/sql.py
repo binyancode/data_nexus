@@ -171,4 +171,9 @@ class SqlResolver(Resolver):
     def sample(self, target: str = None, n: int = 5) -> list[dict[str, Any]]:
         if not target:
             return []
-        return self._db.execute_query(f"SELECT TOP {int(n)} * FROM {target}")
+        parts = target.split(".")
+        if not 1 <= len(parts) <= 4 or any(not part.strip() for part in parts):
+            raise ValueError(f"非法 SQL Server 表名：{target}")
+        quoted = ".".join(f"[{part.strip().replace(']', ']]')}]" for part in parts)
+        limit = max(1, min(int(n), 100))
+        return self._db.execute_query(f"SELECT TOP ({limit}) * FROM {quoted}")

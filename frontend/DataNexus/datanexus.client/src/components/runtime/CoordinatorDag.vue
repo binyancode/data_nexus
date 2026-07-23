@@ -1,5 +1,9 @@
 <template>
-  <div class="dag-wrap">
+  <div
+    class="dag-wrap"
+    :class="{ 'is-resizing': isResizing }"
+    :style="{ height: `${canvasHeight}px` }"
+  >
     <div v-if="!planNodes.length" class="dag-empty">暂无执行图</div>
     <button v-if="planNodes.length" class="dag-reset" title="恢复自动布局" @click="resetLayout">⟲ 自动布局</button>
     <VueFlow
@@ -15,19 +19,33 @@
       class="dag-canvas"
       @node-click="onNodeClick"
       @node-drag-stop="onNodeDragStop"
-      @pane-click="selectedId = null"
+      @pane-click="closeDetail"
     >
       <Background pattern-color="#d9e2ee" :gap="24" :size="1.3" />
       <Controls :show-interactive="false" />
     </VueFlow>
 
     <transition name="fade">
-      <div v-if="selected" class="node-detail">
+      <div
+        v-if="selected"
+        class="node-detail"
+        :class="{ 'is-maximized': detailMaximized }"
+        @click.stop
+      >
         <div class="nd-head">
           <span class="nd-dot" :style="{ background: stateColor(state?.state) }"></span>
           <span class="nd-name">{{ selected.name || selected.id }}</span>
           <span class="nd-badge">{{ stateLabel(state?.state) }}</span>
-          <span class="nd-close" @click="selectedId = null">✕</span>
+          <button
+            type="button"
+            class="nd-action"
+            :title="detailMaximized ? '还原详情面板' : '最大化详情面板'"
+            :aria-label="detailMaximized ? '还原详情面板' : '最大化详情面板'"
+            @click.stop="toggleDetailSize"
+          >
+            <el-icon><ScaleToOriginal v-if="detailMaximized" /><FullScreen v-else /></el-icon>
+          </button>
+          <button type="button" class="nd-action nd-close" title="关闭详情面板" aria-label="关闭详情面板" @click.stop="closeDetail">✕</button>
         </div>
         <div class="nd-row"><b>类型</b><span>{{ selected.kind }}</span></div>
         <div class="nd-row"><b>位置</b><span>{{ state?.resolver || selected.source_instance || selected.engine || selected.resolver || '—' }}</span></div>
@@ -41,11 +59,26 @@
         <div class="nd-block err" v-if="state?.error"><b>错误</b><pre>{{ state.error }}</pre></div>
       </div>
     </transition>
+
+    <div
+      v-if="planNodes.length"
+      class="dag-resize-handle"
+      :class="{ active: isResizing }"
+      role="separator"
+      aria-label="调整执行图画布高度"
+      aria-orientation="horizontal"
+      tabindex="0"
+      title="向下拖动延伸画布"
+      @pointerdown.stop="startResize"
+      @keydown.down.prevent="resizeBy(40)"
+      @keydown.up.prevent="resizeBy(-40)"
+    ><span></span></div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, markRaw, nextTick, ref } from 'vue'
+import { FullScreen, ScaleToOriginal } from '@element-plus/icons-vue'
 import { VueFlow, useVueFlow } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
 import { Controls } from '@vue-flow/controls'
@@ -55,6 +88,7 @@ import '@vue-flow/controls/dist/style.css'
 import { computeWaves, positionMap, buildEdges, stateColor, safeParse, dagNode } from './dag'
 import DagNode from './DagNode.vue'
 import LlmUsagePanel from './LlmUsagePanel.vue'
+import { useResizableDag } from './useResizableDag'
 import type { RunNode } from '../../bff/Runs'
 
 const nodeTypes: any = { dagNode: markRaw(DagNode) }
@@ -78,6 +112,8 @@ const props = defineProps<{
 
 const planNodes = computed<PlanNode[]>(() => props.plan?.nodes ?? [])
 const selectedId = ref<string | null>(null)
+const detailMaximized = ref(false)
+const { canvasHeight, isResizing, startResize, resizeBy } = useResizableDag(340)
 const { fitView } = useVueFlow()
 
 // 拖动后的位置覆盖（id → 坐标）；空则用自动布局。恢复布局 = 清空。
@@ -184,6 +220,14 @@ const callText = computed(() => {
 
 function onNodeClick(e: { node: { id: string } }) {
   selectedId.value = e.node.id
+  detailMaximized.value = false
+}
+function closeDetail() {
+  selectedId.value = null
+  detailMaximized.value = false
+}
+function toggleDetailSize() {
+  detailMaximized.value = !detailMaximized.value
 }
 </script>
 
@@ -197,6 +241,7 @@ function onNodeClick(e: { node: { id: string } }) {
   overflow: hidden;
   background: #f4f8fd;
 }
+.dag-wrap.is-resizing { user-select: none; }
 .dag-canvas { width: 100%; height: 100%; }
 .dag-reset {
   position: absolute;
@@ -248,12 +293,48 @@ function onNodeClick(e: { node: { id: string } }) {
   font-size: 12px;
   max-height: 92%;
   overflow: auto;
+  z-index: 8;
+  box-sizing: border-box;
+  transition: inset 0.16s ease, width 0.16s ease, border-radius 0.16s ease;
+}
+.node-detail.is-maximized {
+  inset: 0;
+  width: auto;
+  max-height: none;
+  border: 0;
+  border-radius: 11px;
+  padding: 16px 18px 22px;
 }
 .nd-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.node-detail.is-maximized .nd-head {
+  position: sticky;
+  top: -16px;
+  z-index: 2;
+  margin: -16px 0 10px;
+  padding: 16px 0 10px;
+  border-bottom: 1px solid #e3ebf4;
+  background: #fff;
+}
 .nd-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; box-shadow: 0 0 0 2px rgba(157, 170, 186, 0.2); }
 .nd-name { font-weight: 700; flex: 1; color: #1f2f43; }
 .nd-badge { font-size: 10px; color: #6f859c; }
-.nd-close { cursor: pointer; color: #7a8da3; }
+.nd-action {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #7a8da3;
+  cursor: pointer;
+}
+.nd-action:hover { color: #146f8b; background: #edf5fa; }
+.nd-action .el-icon { font-size: 15px; }
+.nd-close { font-size: 14px; }
 .nd-row { display: flex; gap: 8px; margin: 3px 0; color: #2f455e; }
 .nd-row b { color: #6f859c; font-weight: 600; min-width: 34px; }
 .nd-val { font-weight: 700; color: #1f2f43; }
@@ -270,7 +351,37 @@ function onNodeClick(e: { node: { id: string } }) {
   overflow: auto;
   white-space: pre-wrap;
 }
+.node-detail.is-maximized .nd-block pre { max-height: none; }
 .nd-block.err pre { background: #fff2f2; border-color: #f0caca; color: #a33a3a; }
+.dag-resize-handle {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 11px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  touch-action: none;
+  outline: none;
+}
+.dag-resize-handle span {
+  width: 54px;
+  height: 3px;
+  border-radius: 3px;
+  background: #aebfd1;
+  opacity: 0.72;
+  transition: width 0.15s, background 0.15s, opacity 0.15s;
+}
+.dag-resize-handle:hover span,
+.dag-resize-handle:focus-visible span,
+.dag-resize-handle.active span {
+  width: 78px;
+  background: #177c99;
+  opacity: 1;
+}
 .fade-enter-active, .fade-leave-active { transition: opacity 0.15s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

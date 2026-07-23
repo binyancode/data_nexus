@@ -50,6 +50,8 @@
           <div class="side-h">
             <span>实体 · {{ selEntity.name }}</span>
             <span class="sh-actions">
+              <button class="sh-preview" title="预览样例数据" :disabled="!selEntity.resolver || !selEntity.table"
+                      @click="openSamplePreview(selEntity)">预览</button>
               <button v-if="meta?.canEdit" class="sh-refresh" title="从数据库刷新该表结构" @click="refreshEntity(selEntity)">⟳</button>
               <button class="x" @click="selEntityId = null">✕</button>
             </span>
@@ -192,6 +194,36 @@
 
     <ImportWizard v-model="importOpen" @imported="onImported" />
 
+    <el-dialog v-model="sampleOpen" :title="`样例数据 · ${sampleEntityName}`" width="88%" top="6vh"
+               class="sample-dialog" append-to-body destroy-on-close>
+      <div class="sample-toolbar">
+        <div class="sample-source">
+          <span>{{ sampleResolver }}</span>
+          <b>·</b>
+          <code>{{ sampleTarget }}</code>
+        </div>
+        <div class="sample-controls">
+          <span>行数</span>
+          <el-select v-model="sampleLimit" size="small" style="width:86px" @change="loadSamplePreview">
+            <el-option v-for="n in [10, 20, 50, 100]" :key="n" :value="n" :label="String(n)" />
+          </el-select>
+          <el-button size="small" :loading="sampleLoading" @click="loadSamplePreview">刷新</el-button>
+        </div>
+      </div>
+      <el-alert v-if="sampleError" type="error" title="样例数据读取失败" :description="sampleError"
+                :closable="false" show-icon class="sample-error" />
+      <el-table v-else v-loading="sampleLoading" :data="sampleRows" height="58vh" border stripe
+                empty-text="该实体没有可显示的样例行">
+        <el-table-column v-for="column in sampleColumns" :key="column" :label="column"
+                         :min-width="sampleColumnWidth(column)" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span :class="{ 'sample-null': row[column] == null }">{{ formatSampleValue(row[column]) }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer><el-button @click="sampleOpen = false">关闭</el-button></template>
+    </el-dialog>
+
     <!-- 挂载无 concept 的能力源（Agent / Web IQ / Action 等） -->
     <el-dialog v-model="attachOpen" title="挂载能力源" width="440px">
       <div class="fld">
@@ -225,7 +257,7 @@ import {
   type OntologyFull, type OntologyGraph, type OntologyMeta,
 } from '../bff/Ontology.js'
 import type { ImportFragment } from '../backend/Resolvers.js'
-import { listResolvers, resolverSchema, type ResolverInfo } from '../backend/Resolvers.js'
+import { listResolvers, resolverSchema, resolverSample, type ResolverInfo } from '../backend/Resolvers.js'
 
 const props = defineProps<{ ontologyId: string }>()
 defineEmits<{ (e: 'back'): void }>()
@@ -238,6 +270,16 @@ const saving = ref(false)
 const loading = ref(true)          // 初始即加载态，打开时立刻显示
 const legacyGraph = ref<any | null>(null)
 const migrationIssues = ref<MigrationIssue[]>([])
+
+const sampleOpen = ref(false)
+const sampleLoading = ref(false)
+const sampleError = ref('')
+const sampleEntityName = ref('')
+const sampleResolver = ref('')
+const sampleTarget = ref('')
+const sampleLimit = ref(20)
+const sampleColumns = ref<string[]>([])
+const sampleRows = ref<Array<Record<string, unknown>>>([])
 
 const visLabel = computed(() => ({ private: '私有', shared: '共享', public: '公开' } as any)[meta.value?.visibility || 'private'])
 
@@ -376,6 +418,49 @@ const allAttrsEnabled = computed(() => (selEntity.value?.attributes || []).every
 function setAttrEnabled(a: any, v: boolean) { a.enabled = v }
 function toggleAllAttrs(v: boolean) {
   for (const a of (selEntity.value?.attributes || []) as any[]) a.enabled = v
+}
+
+function openSamplePreview(entity: any) {
+  if (!entity?.resolver || !entity?.table) return
+  sampleEntityName.value = entity.name || entity.id
+  sampleResolver.value = entity.resolver
+  sampleTarget.value = entity.table
+  sampleColumns.value = []
+  sampleRows.value = []
+  sampleError.value = ''
+  sampleOpen.value = true
+  loadSamplePreview()
+}
+
+async function loadSamplePreview() {
+  if (!sampleResolver.value || !sampleTarget.value) return
+  sampleLoading.value = true
+  sampleError.value = ''
+  try {
+    const result = await resolverSample(sampleResolver.value, sampleTarget.value, sampleLimit.value)
+    sampleRows.value = result.rows || []
+    sampleColumns.value = result.columns?.length
+      ? result.columns
+      : Object.keys(sampleRows.value[0] || {})
+  } catch (error: any) {
+    sampleRows.value = []
+    sampleColumns.value = []
+    sampleError.value = error?.response?.data?.detail || error?.response?.data?.message || error?.message || String(error)
+  } finally {
+    sampleLoading.value = false
+  }
+}
+
+function formatSampleValue(value: unknown): string {
+  if (value == null) return 'NULL'
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value) } catch { return String(value) }
+  }
+  return String(value)
+}
+
+function sampleColumnWidth(column: string): number {
+  return Math.max(130, Math.min(280, column.length * 12 + 40))
 }
 
 // ── 从数据库刷新表结构（只改结构属性 column/dtype，保留用户的 role/additivity/名称/同义词/语义）──
@@ -723,6 +808,19 @@ function slug(s: string) {
   width: 22px; height: 22px; border-radius: 6px; font-size: 13px; line-height: 1;
 }
 .sh-refresh:hover { background: #f1f6fb; color: #33475b; }
+.sh-preview {
+  height: 22px; padding: 0 8px; border: 1px solid #b9d5df; border-radius: 6px;
+  background: #f3fafc; color: #176f87; font-size: 11px; cursor: pointer;
+}
+.sh-preview:hover { background: #e5f4f8; border-color: #6baabc; }
+.sh-preview:disabled { opacity: .45; cursor: not-allowed; }
+.sample-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:12px; }
+.sample-source { min-width:0; display:flex; align-items:center; gap:7px; color:#667991; font-size:12px; }
+.sample-source code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#29445f; }
+.sample-controls { display:flex; align-items:center; gap:8px; color:#667991; font-size:12px; flex:0 0 auto; }
+.sample-error { margin-bottom:12px; }
+.sample-error :deep(.el-alert__description) { white-space:pre-wrap; overflow-wrap:anywhere; user-select:text; }
+.sample-null { color:#9aa8b7; font-style:italic; }
 .al-edit {
   padding: 10px 10px 4px; margin: 2px 0 8px;
   background: #f7fafd; border: 1px solid #e6edf5; border-radius: 8px;
