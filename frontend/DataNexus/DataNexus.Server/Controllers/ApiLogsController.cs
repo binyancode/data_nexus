@@ -6,6 +6,7 @@ using Microsoft.Data.SqlClient;
 using System.Data;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace DataNexus.Server.Controllers
 {
@@ -133,7 +134,7 @@ namespace DataNexus.Server.Controllers
                     response = RedactJson(row.Field<string?>("response")),
                     state = row.Field<string?>("state"),
                     cost_ms = row.IsNull("cost_ms") ? (int?)null : row.Field<int>("cost_ms"),
-                    message = row.Field<string?>("message"),
+                    message = RedactText(row.Field<string?>("message")),
                     request_time = row.Field<DateTime?>("request_time"),
                     response_time = row.Field<DateTime?>("response_time"),
                     source = row.Field<string?>("source"),
@@ -178,6 +179,11 @@ namespace DataNexus.Server.Controllers
             },
             StringComparer.OrdinalIgnoreCase);
 
+        private static readonly Regex SensitiveText = new(
+            "(?ix)\\b(password|pwd|client_secret|api[_-]?key|access[_-]?token|refresh[_-]?token|authorization)\\s*[=:]\\s*([^;,\\s\\\"'}]+)",
+            RegexOptions.Compiled,
+            TimeSpan.FromMilliseconds(100));
+
         private static string? RedactJson(string? value)
         {
             if (string.IsNullOrWhiteSpace(value)) return value;
@@ -207,6 +213,13 @@ namespace DataNexus.Server.Controllers
             {
                 foreach (var item in array) RedactNode(item);
             }
+        }
+
+        private static string? RedactText(string? value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            try { return SensitiveText.Replace(value, "$1=***"); }
+            catch (RegexMatchTimeoutException) { return "[message redaction timed out]"; }
         }
     }
 }

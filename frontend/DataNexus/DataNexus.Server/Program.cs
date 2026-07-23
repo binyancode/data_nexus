@@ -4,6 +4,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Identity.Web;
 using System.Security.Claims;
 using DataNexus.Server.Configs;
+using DataNexus.Server.Middleware;
 using DataNexus.Server.Services;
 
 namespace DataNexus.Server
@@ -86,6 +87,8 @@ namespace DataNexus.Server
 
             app.UseHttpsRedirection();
 
+            // 记录所有 BFF 请求。放在认证前以覆盖 401/403；请求结束后仍可取得已认证用户。
+            app.UseMiddleware<ApiLogMiddleware>();
             app.UseAuthentication();
             app.UseAuthorization();
 
